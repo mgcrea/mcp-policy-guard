@@ -21,13 +21,14 @@ from typing import Any
 
 import httpx
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import LATEST_PROTOCOL_VERSION
 
 from mcp_guard.middleware import GuardMiddleware
 from mcp_guard.principal import current_principal
 from mcp_guard.request import guarded
+
+from ._mcp_compat import IS_V1, PROTOCOL_VERSION, build_app, build_server, register_tool
+
+LATEST_PROTOCOL_VERSION = PROTOCOL_VERSION
 
 JSON_HEADERS = {
     "Content-Type": "application/json",
@@ -37,26 +38,20 @@ JSON_HEADERS = {
 
 @contextlib.asynccontextmanager
 async def _client(config, *, stateless: bool, guard_handler: bool = True):
-    """A client wired to a FastMCP whose one tool reports the principal it can see.
+    """A client wired to a server whose one tool reports the principal it can see.
 
     `guard_handler=False` builds the same server with the fix removed, so a test can assert
     the leak is real rather than hypothetical.
     """
-    mcp = FastMCP("binding-probe")
+    mcp = build_server("binding-probe")
 
     async def _whoami_impl() -> str:
         principal = current_principal()
         return principal.subject if principal else "anonymous"
 
-    mcp.tool(name="whoami")(guarded(_whoami_impl) if guard_handler else _whoami_impl)
+    register_tool(mcp, "whoami", guarded(_whoami_impl) if guard_handler else _whoami_impl)
 
-    mcp.settings.streamable_http_path = "/mcp"
-    mcp.settings.json_response = True
-    mcp.settings.stateless_http = stateless
-    # Irrelevant to what is under test, and it rejects the synthetic Host ASGITransport sends.
-    mcp.settings.transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
-    inner = mcp.streamable_http_app()
-
+    inner = build_app(mcp, stateless=stateless)
     guarded_app = GuardMiddleware(inner, config)
 
     # The session manager's task group is started by the app's lifespan, so it has to run
@@ -152,13 +147,12 @@ class TestPerMessagePrincipal:
         assert current_principal() is None
 
 
+@pytest.mark.skipif(not IS_V1, reason="2.x dispatches each message in its own task and does not leak")
 class TestTheLeakIsReal:
-    """Without the per-message binding the guard hands one caller another's identity.
+    """Without the per-message binding, SDK 1.x hands one caller another's identity.
 
-    Kept as an executable statement of the bug, so `guarded` cannot quietly become a no-op.
-    MCP SDK 2.x dispatches each message in its own task and does not leak; when this package
-    moves to it, this test fails, and that failure is the signal to re-examine whether the
-    decorator is still load-bearing rather than to delete it on a hunch.
+    Kept as an executable statement of the bug, so `guarded` cannot quietly become a no-op on
+    the generation where it is load-bearing. Skipped on 2.x, where the SDK fixed it upstream.
     """
 
     async def test_an_unguarded_handler_sees_the_session_opener(self, config, make_token):
@@ -168,3 +162,42 @@ class TestTheLeakIsReal:
             assert await _whoami(client, make_token(sub="user-a-sub"), session_id) == "user-a-sub"
             # The bug, stated plainly: B asked, A answered.
             assert await _whoami(client, make_token(sub="user-b-sub"), session_id) == "user-a-sub"
+
+
+class TestGuardedIsSafeOnBothGenerations:
+    """`@guarded` must never make things worse than not using it.
+
+    On 2.x there is no ambient per-message request to read, so a naive implementation binds
+    `None` and blanks the caller the ASGI middleware already established correctly — every
+    call then fails with `AuthenticationRequired`. Fails closed, but the server is bricked.
+    The binding therefore only replaces what is bound when it has something better to put
+    there.
+    """
+
+    async def test_a_guarded_handler_still_sees_its_caller(self, config, make_token):
+        async with _client(config, stateless=False) as client:
+            session_id = await _initialize(client, make_token(sub="user-a-sub"))
+            assert await _whoami(client, make_token(sub="user-a-sub"), session_id) != "anonymous"
+
+    def test_binding_without_a_request_preserves_the_existing_caller(self):
+        from mcp_guard.principal import Principal, set_principal
+        from mcp_guard.request import bind_request_principal
+
+        someone = Principal(subject="already-bound", token="t")
+        set_principal(someone)
+        try:
+            with bind_request_principal(None) as bound:
+                assert bound is someone
+                assert current_principal() is someone
+        finally:
+            set_principal(None)
+
+    def test_binding_without_a_request_can_still_be_required(self):
+        from mcp_guard.errors import AuthenticationRequired
+        from mcp_guard.principal import set_principal
+        from mcp_guard.request import bind_request_principal
+
+        set_principal(None)
+        with pytest.raises(AuthenticationRequired):
+            with bind_request_principal(None, required=True):
+                pass

@@ -44,10 +44,18 @@ jobs:
       - run: uv run ruff format --check src/
 
   test:
-    name: Run Tests
+    # The MCP SDK is not a dependency of this package, but the per-message principal binding
+    # is written against SDK internals that differ between generations — and 1.x is the one
+    # where the binding is load-bearing rather than belt-and-braces. Both are tested because
+    # a change that works on one can silently blank the caller on the other.
+    name: Run Tests (mcp ${{ matrix.mcp }})
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/astral-sh/uv:python3.13-bookworm-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        mcp: ["1.26.0", "2.0.0"]
     steps:
       - uses: actions/checkout@v4
       - name: Cache uv
@@ -57,7 +65,7 @@ jobs:
           key: uv-${{ hashFiles('uv.lock') }}
           restore-keys: uv-
       - run: uv sync --frozen
-      - run: uv run pytest -v
+      - run: uv run --with 'mcp==${{ matrix.mcp }}' pytest -v
 
   # No Docker release job: this is a library, not a service. Consuming MCP servers depend on
   # it from their own pyproject.toml and vendor it into their image at `uv sync`.
