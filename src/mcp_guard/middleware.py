@@ -4,9 +4,14 @@ Wrapping the MCP app rather than passing `middleware=[...]` to `Starlette(...)` 
 deliberate: a Kubernetes readiness probe hits `/healthz`, and a Starlette-level middleware
 would demand a bearer token from the kubelet. Mount it around the MCP app only —
 
-    Mount("/", app=GuardMiddleware(mcp.streamable_http_app(), guard))
+    Mount("/", app=GuardMiddleware(mcp.streamable_http_app(), guard.config))
 
-— and the probe route stays open while every path that can reach a tool is covered.
+— and the probe route stays open while every path that can reach a tool is covered. Note it
+takes the `GuardConfig`, not the `Guard`; passing the latter fails on the first request.
+
+**This middleware is half the story.** It establishes who is calling for one HTTP request;
+`mcp_guard.request` is what makes a tool handler read *that* caller rather than whoever
+opened the MCP session. Neither is sufficient alone.
 """
 
 from __future__ import annotations
@@ -14,12 +19,21 @@ from __future__ import annotations
 import json
 from typing import Any, Awaitable, Callable
 
+import anyio.to_thread
 import structlog
 
 from .config import GuardConfig
 from .errors import AuthenticationRequired
 from .jwt_verify import verify_token
-from .principal import set_caller_id, set_correlation_id, set_principal
+from .principal import (
+    reset_caller_id,
+    reset_correlation_id,
+    reset_principal,
+    set_caller_id,
+    set_correlation_id,
+    set_principal,
+)
+from .request import SCOPE_CALLER_ID, SCOPE_CORRELATION_ID, SCOPE_PRINCIPAL
 
 logger = structlog.get_logger()
 
@@ -65,11 +79,31 @@ class GuardMiddleware:
 
         headers = _headers(scope)
 
-        # Bound to the context *before* the auth check, so a 401 still logs under the
-        # correlation id of the turn that caused it.
-        set_correlation_id(headers.get(self.config.correlation_header))
-        set_caller_id(headers.get(self.config.caller_id_header))
+        correlation_id = headers.get(self.config.correlation_header)
+        caller_id = headers.get(self.config.caller_id_header)
 
+        # The scope is the source of truth: it belongs to *this* HTTP request, so a task
+        # spawned by an earlier request cannot have captured it. See `request.py`.
+        scope[SCOPE_CORRELATION_ID] = correlation_id
+        scope[SCOPE_CALLER_ID] = caller_id
+        scope[SCOPE_PRINCIPAL] = None
+
+        # Also bound to the context here, *before* the auth check, so a 401 logs under the
+        # correlation id of the turn that caused it, and so non-MCP callers that never reach
+        # `GuardServerMiddleware` still see the caller. Reset on the way out: whether this
+        # task is reused is the server's business, not ours, and a binding left behind is
+        # one an unrelated later caller could read.
+        correlation_token = set_correlation_id(correlation_id)
+        caller_token = set_caller_id(caller_id)
+        principal_token = set_principal(None)
+        try:
+            await self._dispatch(scope, receive, send, headers)
+        finally:
+            reset_principal(principal_token)
+            reset_caller_id(caller_token)
+            reset_correlation_id(correlation_token)
+
+    async def _dispatch(self, scope: Scope, receive: Receive, send: Send, headers: dict[str, str]) -> None:
         token = _bearer(headers)
 
         if token is None:
@@ -78,12 +112,14 @@ class GuardMiddleware:
                 return
             # Not enforcing: no principal, and every later policy check will say so rather
             # than inventing an anonymous identity that policy could accidentally match.
-            set_principal(None)
             await self.app(scope, receive, send)
             return
 
         try:
-            principal = verify_token(token, self.config)
+            # Off the event loop: verification can fetch the discovery document and the key
+            # set, both blocking `httpx`/`urllib` calls. Run inline they would stall every
+            # other request on this worker for the duration of a cold start.
+            principal = await anyio.to_thread.run_sync(verify_token, token, self.config)
         except AuthenticationRequired as exc:
             if self.config.require_auth:
                 await _unauthorized(send, exc.reason)
@@ -94,6 +130,7 @@ class GuardMiddleware:
             await _unauthorized(send, exc.reason)
             return
 
+        scope[SCOPE_PRINCIPAL] = principal
         set_principal(principal)
         logger.debug(
             "request_authenticated",

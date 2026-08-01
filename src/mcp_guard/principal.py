@@ -120,12 +120,20 @@ def set_correlation_id(value: str | None) -> contextvars.Token[str | None]:
     return _current_correlation_id.set(value)
 
 
+def reset_correlation_id(token: contextvars.Token[str | None]) -> None:
+    _current_correlation_id.reset(token)
+
+
 def current_correlation_id() -> str | None:
     return _current_correlation_id.get()
 
 
 def set_caller_id(value: str | None) -> contextvars.Token[str | None]:
     return _current_caller_id.set(value)
+
+
+def reset_caller_id(token: contextvars.Token[str | None]) -> None:
+    _current_caller_id.reset(token)
 
 
 def current_caller_id() -> str | None:

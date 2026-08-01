@@ -49,11 +49,23 @@ from .principal import (
     current_principal,
     require_principal,
 )
+from .request import (
+    SCOPE_CALLER_ID,
+    SCOPE_CORRELATION_ID,
+    SCOPE_PRINCIPAL,
+    GuardServerMiddleware,
+    bind_request_principal,
+    guarded,
+)
+from .routing import routes
 from .snapshot import PolicySnapshot
 
 __version__ = "0.2.0"
 
 __all__ = [
+    "SCOPE_CALLER_ID",
+    "SCOPE_CORRELATION_ID",
+    "SCOPE_PRINCIPAL",
     "AuthenticationRequired",
     "Decision",
     "Guard",
@@ -61,16 +73,20 @@ __all__ = [
     "GuardConfigurationError",
     "GuardError",
     "GuardMiddleware",
+    "GuardServerMiddleware",
     "PolicyDenied",
     "PolicySnapshot",
     "PolicyUnavailable",
     "Principal",
     "Resource",
     "audit_call",
+    "bind_request_principal",
     "current_caller_id",
     "current_correlation_id",
     "current_principal",
     "emit",
+    "guarded",
     "redact",
     "require_principal",
+    "routes",
 ]
