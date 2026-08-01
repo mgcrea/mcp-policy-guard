@@ -115,25 +115,41 @@ def bind_request_principal(request: Any = _UNSET, *, required: bool = False) -> 
     happen. `finally` rather than a plain trailing call, because a handler that raises must
     not leave its identity behind for the next caller.
 
-    `required=True` raises `AuthenticationRequired` when the message carries no verified
-    caller. That is for callers that want the loud failure here rather than at the first
-    policy check.
+    `required=True` raises `AuthenticationRequired` when no verified caller can be found at
+    all. That is for callers that want the loud failure here rather than at the first policy
+    check.
 
-    Omit `request` to take it from the SDK's own per-message context. Passing `None`
-    explicitly is different: it means "there is no request here", and binds nothing.
+    Omit `request` to take it from the SDK's own per-message context.
+
+    **When no request can be found, the existing binding is left alone rather than cleared.**
+    That is what makes this safe on SDK 2.x, which exposes no ambient per-message request:
+    there the ASGI middleware's binding is already this message's caller, and overwriting it
+    with `None` would answer every call with `AuthenticationRequired` — failing closed, but
+    with the whole server bricked. Rebinding is only correct when there is something better
+    to rebind *to*.
     """
     if request is _UNSET:
         request = current_message_request()
 
     scope = _scope_of(request)
+
+    if scope is None:
+        # Nothing authoritative to bind from. Whatever is already bound is the best answer
+        # available, and on 2.x it is the right one.
+        existing = current_principal()
+        if existing is None and required:
+            raise AuthenticationRequired("No authenticated caller on this message")
+        yield existing
+        return
+
     principal = principal_from_scope(scope)
 
     if principal is None and required:
         raise AuthenticationRequired("No authenticated caller on this message")
 
     principal_token = set_principal(principal)
-    correlation_token = set_correlation_id((scope or {}).get(SCOPE_CORRELATION_ID))
-    caller_token = set_caller_id((scope or {}).get(SCOPE_CALLER_ID))
+    correlation_token = set_correlation_id(scope.get(SCOPE_CORRELATION_ID))
+    caller_token = set_caller_id(scope.get(SCOPE_CALLER_ID))
     try:
         yield principal
     finally:
