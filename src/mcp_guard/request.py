@@ -14,15 +14,21 @@ The fix is to carry the principal on the **ASGI scope**, which belongs to one HT
 and so cannot be captured by a task spawned earlier, and to re-bind it around each inbound
 message from the per-message request the SDK already tracks.
 
-Both SDK generations are supported, because they differ exactly here:
+Both SDK generations are supported and both are exercised in CI, because they differ exactly
+here:
 
 * **1.x** keeps a `request_ctx` contextvar holding a `RequestContext` whose `.request` is
   this message's HTTP request. It is set and reset around each message, so reading it inside
-  a handler is correct even though the surrounding task is shared. `guarded` uses it.
+  a handler is correct even though the surrounding task is shared. `guarded` uses it, and on
+  this generation `guarded` is what makes the guard correct at all.
 * **2.x** dispatches each message in its own task with the context already correct — the bug
-  does not reproduce there — and adds a context-tier middleware tier, which
-  `GuardServerMiddleware` registers on so the binding is established once for every tool
-  rather than per decorated handler.
+  does not reproduce there — and exposes no ambient per-message request. It adds a
+  context-tier middleware tier instead, which `GuardServerMiddleware` registers on so the
+  binding is established once for every tool rather than per decorated handler. `guarded`
+  degrades to a no-op that leaves the correct binding untouched.
+
+The SDK is not a dependency of this package; it is detected at runtime, and every lookup into
+it is defensive.
 
 A namespaced scope key rather than `Request.state`, so no framework layer in between can
 reset it out from under the guard.

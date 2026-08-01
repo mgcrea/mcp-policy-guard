@@ -134,9 +134,33 @@ message's scope over the contextvar, and log `principal_binding_disagreement` wh
 differ. A handler missing `@guarded` therefore still authorizes the right caller; it loses
 correct audit attribution rather than leaking data.
 
-On MCP SDK 2.x each message is dispatched in its own task and the leak does not occur.
-Register `GuardServerMiddleware()` on the server there — one registration covers every tool,
-including the one somebody forgets to decorate.
+## MCP SDK compatibility
+
+Both generations are supported and both are tested in CI. The SDK is deliberately **not** a
+dependency of this package — a guard should not drag in a server framework — so it is
+detected at runtime.
+
+| | SDK 1.x | SDK 2.x |
+| --- | --- | --- |
+| Is the session leak present? | **Yes** | No — each message is dispatched in its own task |
+| `@guarded` | **Required.** Reads the SDK's per-message `request_ctx` | Safe no-op; leaves the already-correct binding in place |
+| `GuardServerMiddleware` | Not available (no context-tier middleware) | **Preferred.** One registration covers every tool |
+| Scope-preferred resolution in `evaluate()` | Active | Falls through to the contextvar, which is correct there |
+
+```python
+# 2.x — one registration, nothing to forget
+mcp = MCPServer("my-server", middleware=[GuardServerMiddleware()])
+```
+
+The rule that makes `@guarded` portable: when no per-message request can be found, it
+**leaves the existing binding alone** instead of clearing it. Rebinding is only correct when
+there is something better to rebind to. Clearing it on 2.x — where the ASGI middleware's
+binding is already this message's caller — would answer every call with
+`AuthenticationRequired`: fail-closed, but the whole server bricked. That is pinned by
+`TestGuardedIsSafeOnBothGenerations`.
+
+If you are on 1.x, `TestTheLeakIsReal` asserts the bug still exists without the decorator, so
+it cannot quietly become a no-op on the generation where it matters. It skips on 2.x.
 
 ## Discovery must hide, not refuse
 
