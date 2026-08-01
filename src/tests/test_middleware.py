@@ -216,6 +216,14 @@ class TestTransportPolicy:
         assert replace(enforcing, require_auth=False).sse_allowed is True
 
 
+def _enforcing(monkeypatch):
+    """The minimum env for a config that is allowed to have a policy URL."""
+    monkeypatch.setenv("MCP_REQUIRE_AUTH", "true")
+    monkeypatch.setenv("MCP_AUTH_ISSUER", "https://idp.test/realms/demo")
+    for key in ("MCP_POLICY_TTL_SECONDS", "MCP_POLICY_STALE_MAX_SECONDS"):
+        monkeypatch.delenv(key, raising=False)
+
+
 class TestConfigFromEnv:
     def test_refuses_to_start_enforcing_without_an_issuer(self, monkeypatch):
         # A guard that requires auth but cannot verify anything would accept every caller
@@ -239,13 +247,36 @@ class TestConfigFromEnv:
             GuardConfig.from_env()
 
     def test_policy_is_disabled_unless_both_url_and_tool_id_are_present(self, monkeypatch):
-        monkeypatch.delenv("MCP_REQUIRE_AUTH", raising=False)
+        _enforcing(monkeypatch)
         monkeypatch.setenv("MCP_POLICY_URL", "http://backend/api/policy")
         monkeypatch.delenv("MCP_TOOL_ID", raising=False)
         assert GuardConfig.from_env().policy_enabled is False
 
     def test_strips_a_trailing_slash_from_the_policy_url(self, monkeypatch):
-        monkeypatch.delenv("MCP_REQUIRE_AUTH", raising=False)
+        _enforcing(monkeypatch)
         monkeypatch.setenv("MCP_POLICY_URL", "http://backend/api/policy/")
         monkeypatch.setenv("MCP_TOOL_ID", "tool-1")
         assert GuardConfig.from_env().policy_url == "http://backend/api/policy"
+
+    def test_refuses_policy_without_authentication(self, monkeypatch):
+        # Policy is evaluated per caller. With no verified caller there is nothing to decide
+        # against, so every check would raise — the tool is either wholly broken or, if a
+        # handler catches broadly, wholly open. Neither is what the operator asked for.
+        monkeypatch.delenv("MCP_REQUIRE_AUTH", raising=False)
+        monkeypatch.setenv("MCP_POLICY_URL", "http://backend/api/policy")
+        monkeypatch.setenv("MCP_TOOL_ID", "tool-1")
+        with pytest.raises(GuardConfigurationError) as excinfo:
+            GuardConfig.from_env()
+        # The message must name both variables: the operator has to know which to change.
+        assert "MCP_POLICY_URL" in str(excinfo.value)
+        assert "MCP_REQUIRE_AUTH" in str(excinfo.value)
+
+    def test_refuses_a_staleness_ceiling_below_the_revalidation_interval(self, monkeypatch):
+        # Entries would expire before ever being refreshed: the guard fails closed on every
+        # call after the first, and reads as a PDP outage that examining the PDP cannot
+        # explain.
+        _enforcing(monkeypatch)
+        monkeypatch.setenv("MCP_POLICY_TTL_SECONDS", "300")
+        monkeypatch.setenv("MCP_POLICY_STALE_MAX_SECONDS", "30")
+        with pytest.raises(GuardConfigurationError):
+            GuardConfig.from_env()

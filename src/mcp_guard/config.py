@@ -29,6 +29,14 @@ DEFAULT_SNAPSHOT_TTL_SECONDS = 30.0
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
+# Enough for a busy server's working set of concurrent callers, small enough that the cache
+# cannot become the reason a long-lived process runs out of memory.
+DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES = 512
+
+# One retry, not three: the PDP call sits in front of every guarded tool call, and a caller
+# waiting on a denied query would rather hear "no" than wait out a retry storm.
+DEFAULT_POLICY_RETRIES = 1
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -86,6 +94,12 @@ class GuardConfig:
     #: change rather than a fork.
     correlation_header: str = DEFAULT_CORRELATION_HEADER
     caller_id_header: str = DEFAULT_CALLER_ID_HEADER
+    #: Ceiling on cached per-caller snapshots. One entry per (caller, tool, function), so
+    #: without a bound the cache grows with every distinct user the process ever serves.
+    snapshot_cache_max_entries: int = DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES
+    #: Bounded retries for a PDP call that failed transiently. One timeout with no retry
+    #: turns a blip into a user-visible denial.
+    policy_retries: int = DEFAULT_POLICY_RETRIES
 
     @property
     def policy_enabled(self) -> bool:
@@ -127,16 +141,44 @@ class GuardConfig:
         if raw_fail_mode not in ("closed", "open"):
             raise GuardConfigurationError(f"MCP_POLICY_FAIL_MODE must be 'closed' or 'open', got {raw_fail_mode!r}")
 
+        policy_url = (_env_str("MCP_POLICY_URL") or "").rstrip("/") or None
+        if policy_url and not require_auth:
+            # Authorization without authentication decides nothing: with no verified caller
+            # every policy check raises `AuthenticationRequired`, so the tool is either
+            # wholly broken or — worse, if a handler catches broadly — wholly open. The
+            # operator meant one of the two, and neither is what they get.
+            raise GuardConfigurationError(
+                "MCP_POLICY_URL is set but MCP_REQUIRE_AUTH is not. Policy is evaluated per "
+                "caller, so there is nothing to decide against without authentication. Set "
+                "MCP_REQUIRE_AUTH=true, or unset MCP_POLICY_URL to run without policy."
+            )
+
+        stale_max_seconds = _env_float("MCP_POLICY_STALE_MAX_SECONDS", DEFAULT_STALE_MAX_SECONDS)
+        snapshot_ttl_seconds = _env_float("MCP_POLICY_TTL_SECONDS", DEFAULT_SNAPSHOT_TTL_SECONDS)
+        if stale_max_seconds < snapshot_ttl_seconds:
+            # A staleness ceiling below the revalidation interval means entries expire before
+            # they are ever refreshed: the guard fails closed on every call after the first
+            # and reads as a PDP outage that no amount of staring at the PDP explains.
+            raise GuardConfigurationError(
+                f"MCP_POLICY_STALE_MAX_SECONDS ({stale_max_seconds}) is below "
+                f"MCP_POLICY_TTL_SECONDS ({snapshot_ttl_seconds}); cached policy would "
+                "expire before it is ever revalidated."
+            )
+
         return cls(
             require_auth=require_auth,
             issuer=issuer,
             audience=_env_str("MCP_AUTH_AUDIENCE"),
             tool_id=_env_str("MCP_TOOL_ID"),
-            policy_url=(_env_str("MCP_POLICY_URL") or "").rstrip("/") or None,
+            policy_url=policy_url,
             fail_mode=raw_fail_mode,  # type: ignore[arg-type]
-            stale_max_seconds=_env_float("MCP_POLICY_STALE_MAX_SECONDS", DEFAULT_STALE_MAX_SECONDS),
-            snapshot_ttl_seconds=_env_float("MCP_POLICY_TTL_SECONDS", DEFAULT_SNAPSHOT_TTL_SECONDS),
+            stale_max_seconds=stale_max_seconds,
+            snapshot_ttl_seconds=snapshot_ttl_seconds,
             timeout_seconds=_env_float("MCP_POLICY_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS),
             correlation_header=_env_header("MCP_CORRELATION_HEADER", DEFAULT_CORRELATION_HEADER),
             caller_id_header=_env_header("MCP_CALLER_ID_HEADER", DEFAULT_CALLER_ID_HEADER),
+            snapshot_cache_max_entries=int(
+                _env_float("MCP_POLICY_CACHE_MAX_ENTRIES", DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES)
+            ),
+            policy_retries=int(_env_float("MCP_POLICY_RETRIES", DEFAULT_POLICY_RETRIES)),
         )
