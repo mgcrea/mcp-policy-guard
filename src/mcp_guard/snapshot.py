@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -23,6 +24,24 @@ from .matching import glob_matches
 from .principal import Principal
 
 logger = structlog.get_logger()
+
+#: Statuses that mean the PDP answered and the answer is *no*. Not an outage, so a cached
+#: snapshot must never be served past one of these: the decision point has actively declined
+#: to confirm this caller, and last-known-good would be answering on behalf of an identity it
+#: just refused. 404 is here because an unknown `MCP_TOOL_ID` resolves to no policy at all,
+#: and guessing would mean applying somebody else's rules.
+REFUSAL_STATUSES = frozenset({401, 403, 404})
+
+
+def raise_if_refused(status_code: int, what: str) -> None:
+    """Turn an explicit refusal into `PolicyUnavailable`, which fails closed.
+
+    One definition shared by the evaluate and snapshot paths. They had drifted — evaluate
+    treated 403/404 as denials while snapshot let them fall through to the stale-cache
+    fallback — and a divergence here is invisible until the day it matters.
+    """
+    if status_code in REFUSAL_STATUSES:
+        raise PolicyUnavailable(f"{what}: decision point refused the request (HTTP {status_code})")
 
 
 @dataclass(frozen=True)
@@ -96,11 +115,11 @@ class SnapshotCache:
     def __init__(self, config: GuardConfig, client: httpx.Client | None = None) -> None:
         self._config = config
         self._client = client or httpx.Client(timeout=config.timeout_seconds)
-        self._entries: dict[str, _CacheEntry] = {}
+        #: Bounded and LRU-ordered. One entry per (caller, tool, function), so an unbounded
+        #: dict grows with every distinct user the server ever sees and never forgets the
+        #: ones who left — a slow leak in a process designed to run for weeks.
+        self._entries: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._lock = threading.Lock()
-        #: Monotonic time the PDP was last reachable at all, for any caller. Distinct from
-        #: per-entry freshness: it is what a caller with no cache entry is judged against.
-        self._last_contact: float | None = None
 
     def _key(self, principal: Principal, function_name: str | None) -> str:
         return f"{principal.fingerprint()}|{self._config.tool_id}|{function_name or '*'}"
@@ -119,6 +138,14 @@ class SnapshotCache:
 
         with self._lock:
             entry = self._entries.get(key)
+            if entry is not None:
+                if now - entry.validated_at > self._config.stale_max_seconds:
+                    # Older than it could ever be served, so it is not a cache entry any
+                    # more — just memory holding a revoked grant.
+                    del self._entries[key]
+                    entry = None
+                else:
+                    self._entries.move_to_end(key)
 
         if entry is not None and now - entry.validated_at < self._config.snapshot_ttl_seconds:
             return entry.snapshot
@@ -130,7 +157,10 @@ class SnapshotCache:
 
         with self._lock:
             self._entries[key] = refreshed
-            self._last_contact = refreshed.validated_at
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._config.snapshot_cache_max_entries:
+                evicted, _ = self._entries.popitem(last=False)
+                logger.debug("policy_snapshot_evicted", cache_key=evicted)
         return refreshed.snapshot
 
     def _fetch(self, principal: Principal, function_name: str | None, entry: _CacheEntry | None) -> _CacheEntry:
@@ -155,10 +185,7 @@ class SnapshotCache:
             # the backend was perfectly healthy.
             return _CacheEntry(entry.snapshot, entry.etag, time.monotonic())
 
-        if response.status_code == 401:
-            # Not an outage. The caller's token is bad, and serving them a stale snapshot
-            # would answer for an identity the PDP just refused to confirm.
-            raise PolicyUnavailable("Policy decision point rejected the caller's token")
+        raise_if_refused(response.status_code, "Policy snapshot")
 
         if response.status_code >= 400:
             raise httpx.HTTPError(f"Policy snapshot returned HTTP {response.status_code}")
@@ -207,7 +234,9 @@ class SnapshotCache:
             self._entries.clear()
 
     def close(self) -> None:
-        self._client.close()
+        """No-op on the shared client: `Guard` owns its lifecycle and knows whether it may
+        be closed. Kept so existing callers of `SnapshotCache.close()` still work."""
+        self.invalidate()
 
 
 #: Only ever returned under an explicit `MCP_POLICY_FAIL_MODE=open`.
