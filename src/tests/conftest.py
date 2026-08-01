@@ -134,3 +134,19 @@ def snapshot_body(**overrides: Any) -> dict[str, Any]:
 
 def mock_transport(handler) -> httpx.Client:
     return httpx.Client(transport=httpx.MockTransport(handler), base_url="http://backend.test")
+
+
+@pytest.fixture
+def captured_audit():
+    """Audit records emitted during the test, as dicts."""
+    import structlog
+
+    structlog.configure(
+        processors=[structlog.testing.LogCapture()],
+        wrapper_class=structlog.BoundLogger,
+        cache_logger_on_first_use=False,
+    )
+    entries = structlog.get_config()["processors"][0].entries
+    entries.clear()
+    yield entries
+    structlog.reset_defaults()
