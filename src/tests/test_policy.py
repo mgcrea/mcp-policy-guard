@@ -7,9 +7,9 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from mcp_guard.errors import PolicyDenied, PolicyUnavailable
-from mcp_guard.policy import Guard, Resource
-from mcp_guard.principal import Principal, set_principal
+from mcp_policy_guard.errors import PolicyDenied, PolicyUnavailable
+from mcp_policy_guard.policy import Guard, Resource
+from mcp_policy_guard.principal import Principal, set_principal
 
 from .conftest import snapshot_body
 
@@ -132,7 +132,7 @@ class TestRequire:
         assert decision.allowed is True
 
     def test_reads_the_principal_from_the_context_when_not_given_one(self, config, make_token):
-        from mcp_guard.jwt_verify import verify_token
+        from mcp_policy_guard.jwt_verify import verify_token
 
         set_principal(verify_token(make_token(), config))
         try:

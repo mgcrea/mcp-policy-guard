@@ -7,11 +7,11 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from mcp_guard.audit import redact
-from mcp_guard.errors import PolicyDenied, PolicyUnavailable
-from mcp_guard.policy import MAX_RESOURCES_PER_CALL, UNDETERMINED, Guard, Resource
-from mcp_guard.principal import Principal
-from mcp_guard.snapshot import REFUSAL_STATUSES, SnapshotCache
+from mcp_policy_guard.audit import redact
+from mcp_policy_guard.errors import PolicyDenied, PolicyUnavailable
+from mcp_policy_guard.policy import MAX_RESOURCES_PER_CALL, UNDETERMINED, Guard, Resource
+from mcp_policy_guard.principal import Principal
+from mcp_policy_guard.snapshot import REFUSAL_STATUSES, SnapshotCache
 
 from .conftest import mock_transport, snapshot_body
 
@@ -21,7 +21,7 @@ USER_A = Principal(subject="a", token="tok-a", groups=("/ops",), roles=("analyst
 @pytest.fixture(autouse=True)
 def _bound_caller():
     """Most of these exercise decisions, which need somebody to decide about."""
-    from mcp_guard.principal import set_principal
+    from mcp_policy_guard.principal import set_principal
 
     set_principal(USER_A)
     yield
@@ -254,8 +254,8 @@ class TestAuditIdentityCannotBeOverridden:
     """LOW — the one field a caller must not be able to set is the one naming them."""
 
     def test_extra_cannot_overwrite_the_subject(self, captured_audit):
-        from mcp_guard.audit import emit
-        from mcp_guard.principal import set_principal
+        from mcp_policy_guard.audit import emit
+        from mcp_policy_guard.principal import set_principal
 
         set_principal(USER_A)
         try:

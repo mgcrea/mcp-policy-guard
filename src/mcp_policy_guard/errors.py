@@ -36,7 +36,7 @@ class PolicyDenied(GuardError):
     Carries the denied resources so the caller can decide how much to reveal — which is a
     per-tool judgement, not the guard's. A query tool should name the table (the model
     already named it, so there is no oracle to protect, and naming it stops a retry loop);
-    a discovery tool must not (see `mcp_guard.policy.Guard.filter_resources`).
+    a discovery tool must not (see `mcp_policy_guard.policy.Guard.filter_resources`).
     """
 
     #: False here, True on `PolicyUnavailable`. Lets a tool word its message correctly

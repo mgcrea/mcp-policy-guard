@@ -7,9 +7,9 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from mcp_guard.errors import PolicyUnavailable
-from mcp_guard.principal import Principal
-from mcp_guard.snapshot import PolicySnapshot, SnapshotCache
+from mcp_policy_guard.errors import PolicyUnavailable
+from mcp_policy_guard.principal import Principal
+from mcp_policy_guard.snapshot import PolicySnapshot, SnapshotCache
 
 from .conftest import snapshot_body
 

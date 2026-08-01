@@ -22,9 +22,9 @@ from typing import Any
 import httpx
 import pytest
 
-from mcp_guard.middleware import GuardMiddleware
-from mcp_guard.principal import current_principal
-from mcp_guard.request import guarded
+from mcp_policy_guard.middleware import GuardMiddleware
+from mcp_policy_guard.principal import current_principal
+from mcp_policy_guard.request import guarded
 
 from ._mcp_compat import IS_V1, PROTOCOL_VERSION, build_app, build_server, register_tool
 
@@ -180,8 +180,8 @@ class TestGuardedIsSafeOnBothGenerations:
             assert await _whoami(client, make_token(sub="user-a-sub"), session_id) != "anonymous"
 
     def test_binding_without_a_request_preserves_the_existing_caller(self):
-        from mcp_guard.principal import Principal, set_principal
-        from mcp_guard.request import bind_request_principal
+        from mcp_policy_guard.principal import Principal, set_principal
+        from mcp_policy_guard.request import bind_request_principal
 
         someone = Principal(subject="already-bound", token="t")
         set_principal(someone)
@@ -193,9 +193,9 @@ class TestGuardedIsSafeOnBothGenerations:
             set_principal(None)
 
     def test_binding_without_a_request_can_still_be_required(self):
-        from mcp_guard.errors import AuthenticationRequired
-        from mcp_guard.principal import set_principal
-        from mcp_guard.request import bind_request_principal
+        from mcp_policy_guard.errors import AuthenticationRequired
+        from mcp_policy_guard.principal import set_principal
+        from mcp_policy_guard.request import bind_request_principal
 
         set_principal(None)
         with pytest.raises(AuthenticationRequired):

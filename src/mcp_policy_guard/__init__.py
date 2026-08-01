@@ -1,4 +1,4 @@
-"""mcp-guard — per-caller authorization for MCP servers.
+"""mcp-policy-guard — per-caller authorization for MCP servers.
 
 An MCP server is the last place a request passes before it reaches real data, and the first
 place where "who is asking" and "what are they asking for" are both known. That makes it the
@@ -8,7 +8,7 @@ already had its say.
 
 Typical wiring, in a server's `server.py`:
 
-    from mcp_guard import Guard, GuardMiddleware
+    from mcp_policy_guard import Guard, GuardMiddleware
 
     guard = Guard()
 
@@ -21,7 +21,7 @@ Typical wiring, in a server's `server.py`:
 
 and in a tool handler:
 
-    from mcp_guard import Resource, audit_call
+    from mcp_policy_guard import Resource, audit_call
 
     with audit_call("mssql_query", {"query": query}) as record:
         tables = extract_referenced_tables(query)
@@ -61,7 +61,7 @@ from .request import (
 from .routing import routes
 from .snapshot import PolicySnapshot
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "SCOPE_CALLER_ID",

@@ -10,7 +10,7 @@ would demand a bearer token from the kubelet. Mount it around the MCP app only â
 takes the `GuardConfig`, not the `Guard`; passing the latter fails on the first request.
 
 **This middleware is half the story.** It establishes who is calling for one HTTP request;
-`mcp_guard.request` is what makes a tool handler read *that* caller rather than whoever
+`mcp_policy_guard.request` is what makes a tool handler read *that* caller rather than whoever
 opened the MCP session. Neither is sufficient alone.
 """
 

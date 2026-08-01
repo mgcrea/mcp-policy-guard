@@ -16,8 +16,8 @@ import threading
 
 import pytest
 
-from mcp_guard.errors import AuthenticationRequired
-from mcp_guard.principal import (
+from mcp_policy_guard.errors import AuthenticationRequired
+from mcp_policy_guard.principal import (
     Principal,
     current_principal,
     require_principal,

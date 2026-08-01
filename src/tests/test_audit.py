@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import structlog
 
-from mcp_guard.audit import audit_call, emit, is_secret_key, redact
-from mcp_guard.principal import Principal, set_caller_id, set_correlation_id, set_principal
+from mcp_policy_guard.audit import audit_call, emit, is_secret_key, redact
+from mcp_policy_guard.principal import Principal, set_caller_id, set_correlation_id, set_principal
 
 USER_A = Principal(
     subject="user-a-sub",
@@ -90,7 +90,7 @@ class TestDecisionRecording:
         # The record must survive the exception that ends the call, and must name the
         # resources — a denial with no resources tells an auditor nothing.
         set_principal(USER_A)
-        from mcp_guard.errors import PolicyDenied
+        from mcp_policy_guard.errors import PolicyDenied
 
         with pytest.raises(PolicyDenied):
             with audit_call("mssql_query", {"query": "SELECT * FROM Payroll"}) as record:

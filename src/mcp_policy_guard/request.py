@@ -58,9 +58,9 @@ from .principal import (
 logger = structlog.get_logger()
 
 #: Where `GuardMiddleware` records the verified caller for one HTTP request.
-SCOPE_PRINCIPAL = "mcp_guard.principal"
-SCOPE_CORRELATION_ID = "mcp_guard.correlation_id"
-SCOPE_CALLER_ID = "mcp_guard.caller_id"
+SCOPE_PRINCIPAL = "mcp_policy_guard.principal"
+SCOPE_CORRELATION_ID = "mcp_policy_guard.correlation_id"
+SCOPE_CALLER_ID = "mcp_policy_guard.caller_id"
 
 #: Distinguishes "no request argument given" from an explicit `None`, which means "there is
 #: genuinely no request here" and must not silently fall back to the ambient one.
@@ -218,13 +218,13 @@ def guarded(fn: F) -> F:
     # Lets a server assert that every tool it registered is guarded. Forgetting the
     # decorator on one handler is the realistic failure — it is invisible in review and
     # only misbehaves under concurrent use — so it should be something a test can catch.
-    _wrapper.__mcp_guard_guarded__ = True  # type: ignore[attr-defined]
+    _wrapper.__mcp_policy_guard_guarded__ = True  # type: ignore[attr-defined]
     return _wrapper  # type: ignore[return-value]
 
 
 def is_guarded(fn: Any) -> bool:
     """Whether `fn` was wrapped by `guarded`."""
-    return getattr(fn, "__mcp_guard_guarded__", False) is True
+    return getattr(fn, "__mcp_policy_guard_guarded__", False) is True
 
 
 def audit_principal_disagreement(scope_principal: Principal | None) -> None:

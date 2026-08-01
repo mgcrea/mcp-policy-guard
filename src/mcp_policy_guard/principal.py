@@ -88,12 +88,14 @@ class Principal:
 
 
 _current_principal: contextvars.ContextVar[Principal | None] = contextvars.ContextVar(
-    "mcp_guard_principal", default=None
+    "mcp_policy_guard_principal", default=None
 )
 _current_correlation_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "mcp_guard_correlation_id", default=None
+    "mcp_policy_guard_correlation_id", default=None
 )
-_current_caller_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("mcp_guard_caller_id", default=None)
+_current_caller_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mcp_policy_guard_caller_id", default=None
+)
 
 
 def set_principal(principal: Principal | None) -> contextvars.Token[Principal | None]:

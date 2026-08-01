@@ -7,10 +7,10 @@ from dataclasses import replace
 
 import pytest
 
-from mcp_guard.config import DEFAULT_STALE_MAX_SECONDS, GuardConfig
-from mcp_guard.errors import GuardConfigurationError
-from mcp_guard.middleware import GuardMiddleware
-from mcp_guard.principal import current_caller_id, current_correlation_id, current_principal
+from mcp_policy_guard.config import DEFAULT_STALE_MAX_SECONDS, GuardConfig
+from mcp_policy_guard.errors import GuardConfigurationError
+from mcp_policy_guard.middleware import GuardMiddleware
+from mcp_policy_guard.principal import current_caller_id, current_correlation_id, current_principal
 
 
 class RecordingApp:

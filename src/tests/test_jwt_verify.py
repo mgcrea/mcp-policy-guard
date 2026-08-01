@@ -9,8 +9,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from mcp_guard.errors import AuthenticationRequired
-from mcp_guard.jwt_verify import _jwk_client, verify_token
+from mcp_policy_guard.errors import AuthenticationRequired
+from mcp_policy_guard.jwt_verify import _jwk_client, verify_token
 
 from .conftest import ISSUER, JWKS_URI, KID
 
@@ -143,7 +143,7 @@ class TestDiscovery:
 
     def test_uses_the_discovered_jwks_uri(self, monkeypatch, make_token, config):
         monkeypatch.setattr(
-            "mcp_guard.jwt_verify._fetch_discovery_document",
+            "mcp_policy_guard.jwt_verify._fetch_discovery_document",
             lambda issuer, timeout: {"issuer": issuer, "jwks_uri": "https://idp.test/custom/keys"},
         )
         assert verify_token(make_token(), config).subject == "user-a-sub"
@@ -152,7 +152,7 @@ class TestDiscovery:
     def test_falls_back_when_discovery_is_unreachable(self, monkeypatch, make_token, config):
         # An issuer that serves no discovery document must keep working rather than take
         # the server down at first verify.
-        monkeypatch.setattr("mcp_guard.jwt_verify._fetch_discovery_document", lambda issuer, timeout: None)
+        monkeypatch.setattr("mcp_policy_guard.jwt_verify._fetch_discovery_document", lambda issuer, timeout: None)
         assert verify_token(make_token(), config).subject == "user-a-sub"
         assert _jwk_client(ISSUER, 5.0).uri == JWKS_URI
 
@@ -160,7 +160,7 @@ class TestDiscovery:
         # Without this check, whatever could influence the discovery response would get to
         # nominate the key set this process trusts — which is the whole game.
         monkeypatch.setattr(
-            "mcp_guard.jwt_verify._fetch_discovery_document",
+            "mcp_policy_guard.jwt_verify._fetch_discovery_document",
             lambda issuer, timeout: {"issuer": "https://evil.test", "jwks_uri": "https://evil.test/keys"},
         )
         assert verify_token(make_token(), config).subject == "user-a-sub"
@@ -168,7 +168,7 @@ class TestDiscovery:
 
     def test_falls_back_when_the_document_has_no_jwks_uri(self, monkeypatch, make_token, config):
         monkeypatch.setattr(
-            "mcp_guard.jwt_verify._fetch_discovery_document",
+            "mcp_policy_guard.jwt_verify._fetch_discovery_document",
             lambda issuer, timeout: {"issuer": issuer},
         )
         assert verify_token(make_token(), config).subject == "user-a-sub"
@@ -183,7 +183,7 @@ class TestDiscovery:
             calls.append(issuer)
             return {"issuer": issuer, "jwks_uri": JWKS_URI}
 
-        monkeypatch.setattr("mcp_guard.jwt_verify._fetch_discovery_document", _record)
+        monkeypatch.setattr("mcp_policy_guard.jwt_verify._fetch_discovery_document", _record)
         verify_token(make_token(), config)
         verify_token(make_token(), config)
         assert calls == [ISSUER]

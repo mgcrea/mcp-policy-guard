@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from mcp_guard.matching import glob_matches
+from mcp_policy_guard.matching import glob_matches
 
 
 class TestLiterals:

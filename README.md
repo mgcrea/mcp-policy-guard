@@ -1,4 +1,4 @@
-# mcp-guard
+# mcp-policy-guard
 
 Per-caller authentication and authorization for MCP servers.
 
@@ -25,7 +25,7 @@ endpoints in [Policy decision point contract](#policy-decision-point-contract).
 ## Install
 
 ```toml
-dependencies = ["mcp-guard>=0.2"]
+dependencies = ["mcp-policy-guard>=0.3"]
 ```
 
 ## Wiring a server
@@ -35,7 +35,7 @@ HTTP request; `@guarded` makes the tool handler read *that* caller rather than w
 the MCP session (see [Why two pieces](#why-two-pieces)).
 
 ```python
-from mcp_guard import Guard, routes
+from mcp_policy_guard import Guard, routes
 
 guard = Guard()
 
@@ -61,7 +61,7 @@ would leave a second, unauthenticated door into the same tools.
 ## Guarding a tool
 
 ```python
-from mcp_guard import PolicyDenied, Resource, audit_call, guarded
+from mcp_policy_guard import PolicyDenied, Resource, audit_call, guarded
 
 @mcp.tool()
 @guarded
@@ -106,7 +106,7 @@ Three rules for the resources you pass:
    so an extractor that failed would have its failure converted into an allow.
 
 ```python
-from mcp_guard import UNDETERMINED
+from mcp_policy_guard import UNDETERMINED
 
 try:
     tables = extract_referenced_tables(query)
@@ -309,7 +309,7 @@ Two obligations on whoever implements this:
 2. **`resourceRules` is already precedence-flattened.** Subject matching, priority ordering
    and the deny-wins tiebreak are resolved server-side, because this package walks the list
    first-match-wins and will not re-sort it. Glob semantics must match
-   [matching.py](src/mcp_guard/matching.py) — `test_matching.py` pins the shared cases.
+   [matching.py](src/mcp_policy_guard/matching.py) — `test_matching.py` pins the shared cases.
 
 ## Failure behaviour
 

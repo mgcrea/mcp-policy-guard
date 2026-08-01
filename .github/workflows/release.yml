@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           pyproject="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
-          dunder="$(grep -m1 '^__version__ = ' src/mcp_guard/__init__.py | cut -d'"' -f2)"
+          dunder="$(grep -m1 '^__version__ = ' src/mcp_policy_guard/__init__.py | cut -d'"' -f2)"
           echo "tag=$tag pyproject=$pyproject __version__=$dunder"
           if [ "$tag" != "$pyproject" ] || [ "$tag" != "$dunder" ]; then
             echo "::error::Tag $GITHUB_REF_NAME disagrees with pyproject ($pyproject) and/or __version__ ($dunder)."
@@ -45,7 +45,7 @@ jobs:
     # Gate the release behind a protected environment so publishing can require a review.
     environment:
       name: pypi
-      url: https://pypi.org/p/mcp-guard
+      url: https://pypi.org/p/mcp-policy-guard
     permissions:
       # Trusted publishing: PyPI verifies this workflow's OIDC identity, so there is no API
       # token in the repository to leak or rotate.
@@ -75,13 +75,17 @@ jobs:
           import glob, sys, zipfile
           wheel = sorted(glob.glob("dist/*.whl"))[-1]
           names = zipfile.ZipFile(wheel).namelist()
-          if "mcp_guard/py.typed" not in names:
+          if "mcp_policy_guard/py.typed" not in names:
               sys.exit(f"py.typed missing from {wheel}")
           print(f"ok: {wheel} ships py.typed")
           PY
 
       - name: Publish
-        run: uv publish --trusted-publishing always
+        # `--check-url` makes this idempotent: files already on the index are skipped rather
+        # than re-uploaded, which PyPI rejects outright. Without it, a tag pushed for a
+        # version that was published by hand fails here — after the build has passed and
+        # before the GitHub release is made, which is the worst place to stop.
+        run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/
 
       - name: Create the GitHub release
         env:
