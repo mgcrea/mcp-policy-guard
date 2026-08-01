@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextvars
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -41,14 +43,20 @@ class Principal:
         Sorted, because a token's `groups` array has no guaranteed order and two orderings
         of one identity must not become two cache entries — or worse, let a lookup miss and
         refetch under a key another caller could collide with.
+
+        Hashed over a JSON encoding rather than joined with separators, because separators
+        are forgeable. Joining on `|` and `,` means a caller in group `a,b` produces the same
+        key as a caller in groups `a` and `b`: two different identities, one cache entry,
+        and whichever arrives second is served the first one's permissions. JSON escapes the
+        delimiters instead of trusting them not to appear, so no group name can impersonate
+        a structural boundary.
         """
-        return "|".join(
-            [
-                self.subject,
-                ",".join(sorted(self.groups)),
-                ",".join(sorted(self.roles)),
-            ]
+        encoded = json.dumps(
+            [self.subject, sorted(self.groups), sorted(self.roles)],
+            separators=(",", ":"),
+            ensure_ascii=False,
         )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @classmethod
     def from_claims(cls, claims: dict[str, Any], token: str) -> Principal:
