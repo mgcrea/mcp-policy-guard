@@ -1,0 +1,93 @@
+name: Release
+
+# Publishes on an annotated `v*` tag. Note the tag is pushed to both remotes but only
+# GitHub runs Actions, so this is the one place a release actually happens.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # The tag is the release's only input, so the first thing to establish is that it agrees
+  # with the package. A `v0.3.0` tag on a tree that still says `version = "0.2.0"` would
+  # otherwise publish 0.2.0 a second time — PyPI rejects the re-upload and the failure
+  # arrives *after* the GitHub release exists, leaving a half-made release to unpick.
+  check-version:
+    name: Tag matches package version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare tag against pyproject and __version__
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pyproject="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          dunder="$(grep -m1 '^__version__ = ' src/mcp_guard/__init__.py | cut -d'"' -f2)"
+          echo "tag=$tag pyproject=$pyproject __version__=$dunder"
+          if [ "$tag" != "$pyproject" ] || [ "$tag" != "$dunder" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME disagrees with pyproject ($pyproject) and/or __version__ ($dunder)."
+            exit 1
+          fi
+
+  verify:
+    name: Verify
+    needs: check-version
+    # The same lint, format, test-matrix and build jobs a branch push runs. A release that
+    # skipped them would be the one build nobody checked.
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to PyPI
+    needs: verify
+    runs-on: ubuntu-latest
+    # Gate the release behind a protected environment so publishing can require a review.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/mcp-guard
+    permissions:
+      # Trusted publishing: PyPI verifies this workflow's OIDC identity, so there is no API
+      # token in the repository to leak or rotate.
+      id-token: write
+      # Creating the GitHub release.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The annotated tag's message becomes the release notes, and a shallow clone
+          # fetches the ref without the object carrying that message.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check the wheel ships the typing marker
+        # PEP 561: shipped via an explicit `artifacts` entry in pyproject, which is exactly
+        # the kind of packaging detail that breaks silently and is only noticed by consumers.
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, sys, zipfile
+          wheel = sorted(glob.glob("dist/*.whl"))[-1]
+          names = zipfile.ZipFile(wheel).namelist()
+          if "mcp_guard/py.typed" not in names:
+              sys.exit(f"py.typed missing from {wheel}")
+          print(f"ok: {wheel} ships py.typed")
+          PY
+
+      - name: Publish
+        run: uv publish --trusted-publishing always
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --notes-from-tag \
+            dist/*

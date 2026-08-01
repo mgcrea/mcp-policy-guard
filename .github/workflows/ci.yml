@@ -5,6 +5,9 @@ on:
     branches: ["**"]
   pull_request:
     branches: [main]
+  # Called by release.yml so a tag publishes only what the same checks already passed,
+  # rather than re-stating them in a second file where they can drift.
+  workflow_call:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
