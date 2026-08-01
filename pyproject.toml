@@ -26,6 +26,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_guard"]
+# PEP 561: without this the marker is not shipped and consumers get no type information
+# from a package whose whole value is a typed contract.
+artifacts = ["src/mcp_guard/py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["src/tests"]
