@@ -47,6 +47,10 @@ _SECRET_COMPOUNDS = ("apikey", "privatekey", "secretkey", "accesskey", "connecti
 
 _MAX_VALUE_CHARS = 500
 
+#: How far `redact` descends before summarizing. Bounded so a cyclic or hostile payload
+#: cannot turn writing an audit record into a stack overflow.
+_MAX_REDACT_DEPTH = 6
+
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
 
 
@@ -69,17 +73,37 @@ def is_secret_key(key: str) -> bool:
     return any(compound in collapsed for compound in _SECRET_COMPOUNDS)
 
 
-def redact(params: dict[str, Any]) -> dict[str, Any]:
-    """Mask secret-looking values and truncate long ones."""
-    out: dict[str, Any] = {}
-    for key, value in params.items():
-        if is_secret_key(key):
-            out[key] = "***REDACTED***"
-        elif isinstance(value, str) and len(value) > _MAX_VALUE_CHARS:
-            out[key] = value[:_MAX_VALUE_CHARS] + "...[truncated]"
-        else:
-            out[key] = value
-    return out
+def redact(params: dict[str, Any], *, _depth: int = 0) -> dict[str, Any]:
+    """Mask secret-looking values and truncate long ones, at any nesting depth.
+
+    Recursive because tool arguments are frequently structured: a connection object, an
+    options dict, a list of row filters. A top-level-only pass sends
+    `{"config": {"password": "..."}}` to the log pipeline verbatim, which is the one thing
+    this function exists to prevent — and the shape most likely to carry a credential.
+
+    A key marked secret is masked wholesale rather than descended into: if the key says
+    `credentials`, nothing underneath it needs inspecting.
+    """
+    return {key: _redact_value(key, value, _depth) for key, value in params.items()}
+
+
+def _redact_value(key: str, value: Any, depth: int) -> Any:
+    if is_secret_key(key):
+        return "***REDACTED***"
+    if depth >= _MAX_REDACT_DEPTH:
+        # Deep enough to be a cycle or a pathological payload. Summarize rather than
+        # recurse: an audit record is not obliged to reproduce the whole input, and a
+        # stack overflow here would take down the call it is meant to be recording.
+        return "...[too deeply nested]"
+    if isinstance(value, dict):
+        return redact(value, _depth=depth + 1)
+    if isinstance(value, (list, tuple)):
+        # The key belongs to the container, so each element is re-tested under it: a list
+        # under `passwords` is masked element-wise by the check above.
+        return [_redact_value(key, item, depth + 1) for item in value]
+    if isinstance(value, str) and len(value) > _MAX_VALUE_CHARS:
+        return value[:_MAX_VALUE_CHARS] + "...[truncated]"
+    return value
 
 
 def _identity_fields() -> dict[str, Any]:
@@ -112,8 +136,12 @@ def emit(
         "decision": decision,
         "reason": reason,
         "resources": list(resources),
-        **_identity_fields(),
         **extra,
+        # Last on purpose. Identity is the one thing in an audit record that a caller must
+        # not be able to set: merged before `**extra`, a stray `subject=` keyword — or a
+        # tool that splats user-influenced data in — would file one caller's actions under
+        # another's name, in the log that exists to answer exactly that question.
+        **_identity_fields(),
     }
     if params is not None:
         record["params"] = redact(params)
