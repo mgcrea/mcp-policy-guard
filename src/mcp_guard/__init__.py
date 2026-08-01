@@ -41,7 +41,7 @@ from .errors import (
     PolicyUnavailable,
 )
 from .middleware import GuardMiddleware
-from .policy import Decision, Guard, Resource
+from .policy import UNDETERMINED, Decision, Guard, Resource
 from .principal import (
     Principal,
     current_caller_id,
@@ -66,6 +66,7 @@ __all__ = [
     "SCOPE_CALLER_ID",
     "SCOPE_CORRELATION_ID",
     "SCOPE_PRINCIPAL",
+    "UNDETERMINED",
     "AuthenticationRequired",
     "Decision",
     "Guard",

@@ -10,10 +10,44 @@ import structlog
 
 from .config import GuardConfig
 from .errors import PolicyDenied, PolicyUnavailable
-from .principal import Principal, current_correlation_id, require_principal
-from .snapshot import UNCONFIGURED, PolicySnapshot, SnapshotCache
+from .principal import Principal, current_correlation_id, current_principal, require_principal
+from .request import current_message_request, principal_from_scope
+from .snapshot import UNCONFIGURED, PolicySnapshot, SnapshotCache, raise_if_refused
 
 logger = structlog.get_logger()
+
+
+def _resolve_principal(explicit: Principal | None) -> Principal:
+    """Whose grants this call is decided against, most trustworthy source first.
+
+    The request scope outranks the contextvar deliberately. The contextvar is only correct
+    if something bound it for *this* message — `guarded` or `GuardServerMiddleware` — and a
+    handler where that was forgotten would otherwise be decided against whoever opened the
+    session. Reading the message's own scope here means the guard still authorizes the right
+    caller even when the binding is missing, so a forgotten decorator costs correct audit
+    attribution rather than someone else's data.
+
+    A disagreement between the two is logged loudly: it is the fingerprint of exactly that
+    mistake, and it is invisible from the outside because the wrong answer looks like the
+    right one.
+    """
+    if explicit is not None:
+        return explicit
+
+    scoped = principal_from_scope(getattr(current_message_request(), "scope", None))
+    bound = current_principal()
+
+    if scoped is not None:
+        if bound is not None and bound.subject != scoped.subject:
+            logger.error(
+                "principal_binding_disagreement",
+                bound_subject=bound.subject,
+                request_subject=scoped.subject,
+                hint="the message's caller was not bound; is @guarded missing on this handler?",
+            )
+        return scoped
+
+    return require_principal()
 
 
 @dataclass(frozen=True)
@@ -32,6 +66,28 @@ class Resource:
 
     def __str__(self) -> str:
         return f"{self.kind}:{self.value}"
+
+
+class _Undetermined:
+    """Sentinel: the read set could not be established.
+
+    Distinct from `[]`, which means "this call touches nothing" and is decided by the
+    function-level rule alone. Without a way to say *I do not know*, a resource extractor
+    that failed would pass an empty list and quietly get the answer for a call that reads
+    nothing — the extractor's failure converted into an allow. Passing `UNDETERMINED`
+    denies whenever policy is enforcing, and says so in the audit record.
+    """
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return "UNDETERMINED"
+
+
+#: Pass as `resources` when enumeration failed. See `_Undetermined`.
+UNDETERMINED = _Undetermined()
+
+#: The PDP's own cap on a single request's resource list. Exceeding it is a 400, which would
+#: otherwise be read as an outage and silently degrade to local snapshot evaluation.
+MAX_RESOURCES_PER_CALL = 200
 
 
 @dataclass(frozen=True)
@@ -65,6 +121,9 @@ class Guard:
 
     def __init__(self, config: GuardConfig | None = None, *, client: httpx.Client | None = None) -> None:
         self.config = config or GuardConfig.from_env()
+        #: Only a client we created may be closed by `close()`. An injected one belongs to
+        #: the caller, who may still be using it.
+        self._owns_client = client is None
         self._client = client or httpx.Client(timeout=self.config.timeout_seconds)
         self._snapshots = SnapshotCache(self.config, client=self._client)
 
@@ -73,7 +132,7 @@ class Guard:
     def evaluate(
         self,
         function_name: str | None,
-        resources: Sequence[Resource] = (),
+        resources: Sequence[Resource] | _Undetermined = (),
         *,
         principal: Principal | None = None,
     ) -> Decision:
@@ -84,6 +143,9 @@ class Guard:
         which means every decision lands in the backend's audit log with the caller, the
         resources and the matched rule, and means one implementation of the semantics
         decides. A round trip to a nearby PDP costs far less than the query it guards.
+
+        Pass `UNDETERMINED` for `resources` when the read set could not be established; it
+        denies while enforcing rather than being mistaken for a call that reads nothing.
 
         Falls back to the cached snapshot when the PDP is unreachable, and past
         `MCP_POLICY_STALE_MAX_SECONDS` raises `PolicyUnavailable`.
@@ -97,13 +159,74 @@ class Guard:
                 reason="no policy decision point configured",
             )
 
-        caller = principal or require_principal()
+        caller = _resolve_principal(principal)
 
+        if isinstance(resources, _Undetermined):
+            return self._deny_undetermined(caller, function_name)
+
+        resources = self._prepare_resources(resources)
+
+        last_error: httpx.HTTPError | None = None
+        # One extra attempt by default. A single timeout with no retry turns a momentary
+        # blip — a rolling PDP restart — into a denial the user sees and reports.
+        for attempt in range(self.config.policy_retries + 1):
+            try:
+                return self._evaluate_remote(caller, function_name, resources)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt < self.config.policy_retries:
+                    logger.debug("policy_evaluate_retrying", attempt=attempt + 1, error=str(exc))
+
+        logger.warning("policy_evaluate_unreachable", error=str(last_error))
+        return self._evaluate_from_snapshot(caller, function_name, resources, reason=str(last_error))
+
+    def _deny_undetermined(self, caller: Principal, function_name: str | None) -> Decision:
+        """Refuse a call whose read set could not be established.
+
+        Shadow mode still reports `effect="allow"`: the point of shadow mode is that nothing
+        is blocked while rules are being authored, and an extractor that cannot enumerate is
+        a fact about the tool rather than about the caller's permissions.
+        """
+        enforcing = self._enforcing_for(caller, function_name)
+        logger.warning("policy_resources_undetermined", function=function_name, subject=caller.subject)
+        return Decision(
+            decision="deny",
+            effect="deny" if enforcing else "allow",
+            enforcing=enforcing,
+            reason="the resources this call would touch could not be determined",
+        )
+
+    def _enforcing_for(self, caller: Principal, function_name: str | None) -> bool:
+        """Whether policy is enforcing for this caller, tolerating an unreachable PDP.
+
+        A deny still has to be issued when the backend is down, so an outage here is not
+        allowed to turn into an allow: unknown means enforcing.
+        """
         try:
-            return self._evaluate_remote(caller, function_name, resources)
-        except httpx.HTTPError as exc:
-            logger.warning("policy_evaluate_unreachable", error=str(exc))
-            return self._evaluate_from_snapshot(caller, function_name, resources, reason=str(exc))
+            return self._snapshots.get(caller, function_name).enforcing
+        except (PolicyUnavailable, httpx.HTTPError):
+            return True
+
+    def _prepare_resources(self, resources: Sequence[Resource]) -> Sequence[Resource]:
+        """Dedupe, and refuse rather than silently degrade past the PDP's cap.
+
+        Over the cap the PDP answers 400, which reads as an outage and falls back to local
+        snapshot evaluation — losing the authoritative decision and its audit row without a
+        word to anyone. Deduping first is what keeps a query joining the same table twenty
+        times from tripping it.
+        """
+        deduped = list(dict.fromkeys(resources))
+        if len(deduped) > MAX_RESOURCES_PER_CALL:
+            logger.error(
+                "policy_resource_limit_exceeded",
+                count=len(deduped),
+                limit=MAX_RESOURCES_PER_CALL,
+            )
+            raise PolicyDenied(
+                f"This call names {len(deduped)} resources, above the decision point's limit "
+                f"of {MAX_RESOURCES_PER_CALL}. Refusing rather than deciding on part of it."
+            )
+        return deduped
 
     def _evaluate_remote(self, caller: Principal, function_name: str | None, resources: Sequence[Resource]) -> Decision:
         payload: dict[str, Any] = {
@@ -122,30 +245,34 @@ class Guard:
             timeout=self.config.timeout_seconds,
         )
 
-        if response.status_code in (401, 403, 404):
-            # Not an outage — the PDP answered, and the answer is no. A 404 means this
-            # server's MCP_TOOL_ID names no tool the backend knows, which cannot be
-            # resolved to any policy set; guessing would mean applying someone else's
-            # rules.
-            raise PolicyDenied(f"Policy decision point refused the request (HTTP {response.status_code})")
+        # Shared with the snapshot path so the two cannot disagree about what counts as a
+        # refusal rather than an outage.
+        raise_if_refused(response.status_code, "Policy evaluate")
         if response.status_code >= 400:
             raise httpx.HTTPError(f"Policy evaluate returned HTTP {response.status_code}")
 
-        body = response.json()
-        denied = tuple(
-            Resource(kind=str(entry["resource"]["kind"]), value=str(entry["resource"]["value"]))
-            for entry in body.get("resourceDecisions", [])
-            if entry.get("effect") == "deny"
-        )
-        return Decision(
-            decision=str(body.get("decision", "deny")),
-            effect=str(body.get("effect", "deny")),
-            enforcing=bool(body.get("enforcing", False)),
-            reason=str(body.get("reason", "")),
-            policy_version=body.get("policyVersion"),
-            matched_rule_id=body.get("matchedRuleId"),
-            denied_resources=denied,
-        )
+        try:
+            body = response.json()
+            denied = tuple(
+                Resource(kind=str(entry["resource"]["kind"]), value=str(entry["resource"]["value"]))
+                for entry in body.get("resourceDecisions", [])
+                if entry.get("effect") == "deny"
+            )
+            return Decision(
+                decision=str(body.get("decision", "deny")),
+                effect=str(body.get("effect", "deny")),
+                enforcing=bool(body.get("enforcing", False)),
+                reason=str(body.get("reason", "")),
+                policy_version=body.get("policyVersion"),
+                matched_rule_id=body.get("matchedRuleId"),
+                denied_resources=denied,
+            )
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            # A malformed body is neither an `httpx.HTTPError` nor a `PolicyDenied`, so left
+            # alone it escapes both the snapshot fallback and every `except PolicyDenied` in
+            # tool code — an authorization layer failing *open* through the type system.
+            logger.error("policy_evaluate_malformed_response", error=str(exc))
+            raise PolicyUnavailable(f"Policy decision point returned an unusable response: {exc}") from exc
 
     def _evaluate_from_snapshot(
         self,
@@ -194,7 +321,7 @@ class Guard:
     def require(
         self,
         function_name: str | None,
-        resources: Sequence[Resource] = (),
+        resources: Sequence[Resource] | _Undetermined = (),
         *,
         principal: Principal | None = None,
     ) -> Decision:
@@ -219,7 +346,7 @@ class Guard:
         """The caller's flattened policy, for scoping a listing in one round trip."""
         if not self.config.policy_enabled:
             return UNCONFIGURED
-        return self._snapshots.get(principal or require_principal(), function_name)
+        return self._snapshots.get(_resolve_principal(principal), function_name)
 
     def filter_resources(
         self,
@@ -240,10 +367,21 @@ class Guard:
 
         `key` extracts the resource string from each item when the caller is filtering rows
         rather than bare names.
+
+        Raises `PolicyDenied` when the caller may not invoke the function at all. Filtering
+        alone would answer a forbidden call with a (possibly empty) list, which reads as
+        "you may list, there is simply nothing here" — a different and false statement.
         """
         snapshot = self.snapshot(function_name, principal=principal)
         if not snapshot.enforcing:
             return list(values)
+
+        if snapshot.call_effect != "allow":
+            raise PolicyDenied(
+                "Access denied by policy",
+                matched_rule_id=snapshot.call_rule_id,
+                policy_version=snapshot.version,
+            )
 
         extract = key or (lambda item: item)
         return [item for item in values if snapshot.allows(kind, str(extract(item)))]
@@ -254,7 +392,8 @@ class Guard:
         self._snapshots.invalidate()
 
     def close(self) -> None:
-        self._snapshots.close()
+        if self._owns_client:
+            self._client.close()
 
 
 __all__ = [

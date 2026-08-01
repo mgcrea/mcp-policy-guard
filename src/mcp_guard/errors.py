@@ -39,6 +39,11 @@ class PolicyDenied(GuardError):
     a discovery tool must not (see `mcp_guard.policy.Guard.filter_resources`).
     """
 
+    #: False here, True on `PolicyUnavailable`. Lets a tool word its message correctly
+    #: without an `isinstance` check against a subclass it would have to import and
+    #: remember exists — see that class for why the distinction matters to users.
+    is_outage = False
+
     def __init__(
         self,
         reason: str,
@@ -60,7 +65,14 @@ class PolicyUnavailable(PolicyDenied):
     A subclass of `PolicyDenied` on purpose. Every `except PolicyDenied` in a tool handler
     therefore also catches an outage, so the fail-closed path cannot be forgotten by a
     caller who only remembered to handle denials.
+
+    But *reporting* it as a denial is wrong: telling a user "you do not have access to
+    dbo.orders" during a backend outage sends them to raise an access request for a
+    permission they already have. Check `is_outage` when wording the message — the
+    fail-closed behaviour is identical either way, only the sentence changes.
     """
+
+    is_outage = True
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
