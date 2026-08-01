@@ -30,33 +30,43 @@ dependencies = ["mcp-guard>=0.2"]
 
 ## Wiring a server
 
-Wrap the MCP app, not the whole Starlette app — a readiness probe hits `/healthz` and must
-not be asked for a bearer token:
+Two pieces, and **both are required**. `GuardMiddleware` establishes who is calling for each
+HTTP request; `@guarded` makes the tool handler read *that* caller rather than whoever opened
+the MCP session (see [Why two pieces](#why-two-pieces)).
 
 ```python
-from mcp_guard import Guard, GuardMiddleware
+from mcp_guard import Guard, routes
 
 guard = Guard()
 
-routes = [
+app = Starlette(routes=routes(mcp, guard.config, extra_routes=[
     Route("/healthz", healthz),
     Route("/", root),
-    Mount("/", app=GuardMiddleware(mcp.streamable_http_app(), guard.config)),
-]
-if guard.config.sse_allowed:
-    routes.append(Mount("/", app=mcp.sse_app()))
+]))
 ```
 
-That `if` is not optional politeness. Under SSE the long-lived connection that carried the
-`Authorization` header is not the request that carries a tool call, so the principal
-established at connect time cannot be attributed to the call. `sse_allowed` is `False`
-whenever `MCP_REQUIRE_AUTH` is on, because mounting it anyway would leave a second,
-unauthenticated door into the same tools.
+`routes()` mounts the guarded streamable app at the catch-all and SSE — only when
+`config.sse_allowed` — at its own path ahead of it. Build the list by hand and it is easy to
+write two `Mount("/")` entries, where Starlette returns on the first `Match.FULL` and the
+second is unreachable dead code.
+
+`extra_routes` stay unguarded, which is the point: a readiness probe must not be asked for a
+bearer token.
+
+SSE is refused whenever `MCP_REQUIRE_AUTH` is on. Under SSE the long-lived connection that
+carried the `Authorization` header is not the request that carries a tool call, so the
+principal established at connect time cannot be attributed to the call; mounting it anyway
+would leave a second, unauthenticated door into the same tools.
 
 ## Guarding a tool
 
 ```python
-from mcp_guard import PolicyDenied, Resource, audit_call
+from mcp_guard import PolicyDenied, Resource, audit_call, guarded
+
+@mcp.tool()
+@guarded
+async def mssql_query(query: str) -> str:
+    return await asyncio.to_thread(_sync_query, query)
 
 def _sync_query(query: str) -> str:
     with audit_call("mssql_query", {"query": query}) as record:
@@ -68,19 +78,65 @@ def _sync_query(query: str) -> str:
             decision = guard.require("mssql_query", [Resource("sql_table", t) for t in tables])
         except PolicyDenied as denied:
             record["decision"] = "deny"
+            if denied.is_outage:
+                return "Error: authorization is temporarily unavailable, please retry."
             return f"Error: {denied}"
 
         record["decision"] = decision.decision
         return execute(query)
 ```
 
-Two rules for the resources you pass:
+`@guarded` goes **under** `@mcp.tool()`, so the SDK registers the wrapper. It reads the
+message's own request from the SDK's per-message context, so your handler needs no extra
+parameter and its published schema is unchanged.
+
+Check `denied.is_outage` when wording the message. `PolicyUnavailable` subclasses
+`PolicyDenied` so the fail-closed path cannot be forgotten, but telling a user "you do not
+have access to dbo.orders" during a backend outage sends them to raise an access request for
+a permission they already have.
+
+Three rules for the resources you pass:
 
 1. **Normalize them the way rules are authored** — lowercase `schema.table`. Matching is
    textual, so a rule denying `dbo.payroll` cannot recognise `[Payroll]` as the same thing.
 2. **Enumerate completely, or fail.** Guessing a smaller set than the query actually reads
-   is a breach; guessing a larger one is an annoyed user. Whatever extracts your resources
-   must fail closed when it is unsure.
+   is a breach; guessing a larger one is an annoyed user.
+3. **Say so when you cannot enumerate.** Pass `UNDETERMINED` rather than `[]` — the empty
+   list means "this call touches nothing" and is decided by the function-level rule alone,
+   so an extractor that failed would have its failure converted into an allow.
+
+```python
+from mcp_guard import UNDETERMINED
+
+try:
+    tables = extract_referenced_tables(query)
+except TableExtractionError:
+    guard.require("mssql_query", UNDETERMINED)   # denies while enforcing, and audits why
+```
+
+## Why two pieces
+
+The ASGI middleware knows exactly who is calling — but on MCP SDK 1.x a tool handler does not
+run in the ASGI request task. A stateful streamable-HTTP session dispatches every message
+inside one task spawned when `initialize` arrived, and Python copies the *spawning* task's
+context. Bind the principal to a contextvar in the middleware alone and every later
+`tools/call` reads whoever opened the session, forever: with two users sharing a session, the
+second is authorized against the first one's grants.
+
+So the principal travels on the **ASGI scope**, which belongs to one HTTP request and cannot
+be captured by a task spawned earlier, and `@guarded` re-binds it around each message.
+`src/tests/test_session_binding.py` drives a real server over the real protocol and asserts
+both halves — including an executable statement of the bug, so the decorator cannot quietly
+become a no-op.
+
+As defence in depth, `guard.evaluate()` and `guard.require()` prefer the principal on the
+message's scope over the contextvar, and log `principal_binding_disagreement` when they
+differ. A handler missing `@guarded` therefore still authorizes the right caller; it loses
+correct audit attribution rather than leaking data.
+
+On MCP SDK 2.x each message is dispatched in its own task and the leak does not occur.
+Register `GuardServerMiddleware()` on the server there — one registration covers every tool,
+including the one somebody forgets to decorate.
 
 ## Discovery must hide, not refuse
 
@@ -118,6 +174,21 @@ one on either side silently disables the corresponding control.
 | `MCP_POLICY_TIMEOUT_SECONDS` | HTTP timeout to the PDP and to OIDC discovery. Default 5. |
 | `MCP_CORRELATION_HEADER` | Incoming correlation-id header. Default `x-mcp-correlation-id`. |
 | `MCP_CALLER_ID_HEADER` | Incoming caller-id header. Default `x-mcp-caller-id`. |
+| `MCP_POLICY_CACHE_MAX_ENTRIES` | Cached snapshots before LRU eviction. Default 512. |
+| `MCP_POLICY_RETRIES` | Extra attempts for a transient PDP failure. Default 1. |
+
+Two combinations **refuse to start**, because each is a security control that would silently
+do nothing:
+
+- `MCP_REQUIRE_AUTH=true` with no `MCP_AUTH_ISSUER` — a guard that requires auth but cannot
+  verify anything would accept every caller while the operator believed it was on.
+- `MCP_POLICY_URL` without `MCP_REQUIRE_AUTH` — policy is evaluated per caller, so with no
+  verified caller there is nothing to decide against. Every check would raise, leaving the
+  tool either wholly broken or, if a handler catches broadly, wholly open.
+
+`MCP_POLICY_STALE_MAX_SECONDS` below `MCP_POLICY_TTL_SECONDS` is also refused: entries would
+expire before they were ever revalidated, and the guard would fail closed on every call after
+the first while looking like a PDP outage.
 
 Both header names are lowercased when read, because ASGI hands header names down lowercased
 — so `X-Trace-Id` and `x-trace-id` behave identically.
@@ -126,14 +197,9 @@ The caller id is recorded for audit and **never used in a policy decision**: the
 asserts it and nothing verifies it, so a policy that read it would be taking the word of the
 party it is meant to constrain.
 
-Authentication and authorization are configured independently. A server with
-`MCP_REQUIRE_AUTH` but no `MCP_POLICY_URL` verifies its caller and then allows — the
-intended intermediate state during a rollout, and exactly how the tool behaved before policy
-existed.
-
-`MCP_REQUIRE_AUTH=true` with no `MCP_AUTH_ISSUER` **refuses to start**. A guard that
-requires auth but cannot verify anything would accept every caller while the operator
-believed it was on.
+A server with `MCP_REQUIRE_AUTH` but no `MCP_POLICY_URL` verifies its caller and then allows
+— the intended intermediate state during a rollout, and exactly how the tool behaved before
+policy existed. The reverse is not permitted, as above.
 
 ## Authentication
 
@@ -228,8 +294,9 @@ Two obligations on whoever implements this:
 | PDP reachable | Authoritative decision, audited by the backend. |
 | PDP down, snapshot fresh enough | Decided locally from last-known-good. |
 | PDP down, snapshot too stale | `PolicyUnavailable` — the call is refused. |
-| PDP returns 401 | Refused. Not an outage: the PDP declined to confirm this caller, so a cached snapshot must not answer for them. |
-| PDP returns 404 | Refused. `MCP_TOOL_ID` names no known tool, so no policy applies. |
+| PDP returns 401/403/404 | Refused, on **both** the evaluate and snapshot paths. Not an outage: the PDP declined to confirm this caller, so a cached snapshot must not answer for them. A 404 means `MCP_TOOL_ID` names no known tool, so no policy applies. |
+| PDP returns an unparseable body | Refused. A malformed response is neither an HTTP error nor a denial, so left alone it would escape both the fallback and every `except PolicyDenied`. |
+| More than 200 resources in one call | Refused. Over the PDP's cap the request 400s, which would read as an outage and silently degrade to local evaluation. |
 | `MCP_POLICY_FAIL_MODE=open` | Allowed, loudly logged. Never the default. |
 
 `PolicyUnavailable` subclasses `PolicyDenied` on purpose, so a tool that only remembered to
@@ -252,11 +319,24 @@ granting one would be a larger grant than the thing being audited.
 Each record carries `subject`, `email`, `groups`, `client_id`, `correlation_id`, `caller_id`,
 the `decision`, the `reason`, the `resources` and the redacted `params`. Secret-looking
 parameter keys (`password`, `apiKey`, `connectionString`, …) are masked by whole-word
-matching, which is what keeps `secretary` and `monkey` readable.
+matching, which is what keeps `secretary` and `monkey` readable, and redaction **recurses**
+into nested dicts and lists — `{"config": {"password": "…"}}` is where the credential
+actually lives.
+
+The identity fields are written last and cannot be overridden by keyword arguments to
+`emit()`. The one field a caller must not be able to set is the one naming them.
+
+`caller_id` is recorded from the caller's own header and is **never used in a policy
+decision**: nothing verifies it, so a policy reading it would be taking the word of the party
+it is meant to constrain.
 
 ## Upgrading to 0.2
 
-Breaking changes, all mechanical:
+**Security fix — action required.** Add `@guarded` to every tool handler (or register
+`GuardServerMiddleware` on SDK 2.x). Without it, on a stateful session every call is
+authorized against whoever sent `initialize`. See [Why two pieces](#why-two-pieces).
+
+Also breaking, all mechanical:
 
 - `current_worker_id()` → `current_caller_id()`.
 - The audit field `calling_worker_id` → `caller_id`. Update any log query that reads it.
@@ -266,6 +346,14 @@ Breaking changes, all mechanical:
 - The JWKS endpoint is discovered rather than assumed. Keycloak deployments are unaffected —
   discovery returns the same URL the old code hardcoded, and the hardcoded path remains the
   fallback.
+- `MCP_POLICY_URL` without `MCP_REQUIRE_AUTH` now refuses to start. If you were relying on
+  that combination, it was not enforcing anything.
+- `filter_resources()` now raises `PolicyDenied` when the caller may not invoke the function
+  at all, instead of returning a filtered list.
+- `Guard.close()` no longer closes an `httpx.Client` you injected; it only closes one it
+  created.
+- Token verification runs off the event loop, so `GuardMiddleware` no longer stalls the
+  worker during a cold-start JWKS or discovery fetch.
 
 ## Development
 
