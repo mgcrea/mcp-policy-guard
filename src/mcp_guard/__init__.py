@@ -56,6 +56,7 @@ from .request import (
     GuardServerMiddleware,
     bind_request_principal,
     guarded,
+    is_guarded,
 )
 from .routing import routes
 from .snapshot import PolicySnapshot
@@ -87,6 +88,7 @@ __all__ = [
     "current_principal",
     "emit",
     "guarded",
+    "is_guarded",
     "redact",
     "require_principal",
     "routes",

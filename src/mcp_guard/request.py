@@ -215,7 +215,16 @@ def guarded(fn: F) -> F:
         with bind_request_principal():
             return await fn(*args, **kwargs)
 
+    # Lets a server assert that every tool it registered is guarded. Forgetting the
+    # decorator on one handler is the realistic failure — it is invisible in review and
+    # only misbehaves under concurrent use — so it should be something a test can catch.
+    _wrapper.__mcp_guard_guarded__ = True  # type: ignore[attr-defined]
     return _wrapper  # type: ignore[return-value]
+
+
+def is_guarded(fn: Any) -> bool:
+    """Whether `fn` was wrapped by `guarded`."""
+    return getattr(fn, "__mcp_guard_guarded__", False) is True
 
 
 def audit_principal_disagreement(scope_principal: Principal | None) -> None:
@@ -242,5 +251,6 @@ __all__ = [
     "GuardServerMiddleware",
     "bind_request_principal",
     "guarded",
+    "is_guarded",
     "principal_from_scope",
 ]
