@@ -8,16 +8,11 @@ already had its say.
 
 Typical wiring, in a server's `server.py`:
 
-    from mcp_policy_guard import Guard, GuardMiddleware
+    from mcp_policy_guard import Guard, routes
 
     guard = Guard()
 
-    routes = [
-        Route("/healthz", healthz),
-        Mount("/", app=GuardMiddleware(mcp.streamable_http_app(), guard.config)),
-    ]
-    if guard.config.sse_allowed:
-        routes.append(Mount("/", app=mcp.sse_app()))
+    app = Starlette(routes=routes(mcp, guard.config, extra_routes=[Route("/healthz", healthz)]))
 
 and in a tool handler:
 
@@ -61,7 +56,7 @@ from .request import (
 from .routing import routes
 from .snapshot import PolicySnapshot
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "SCOPE_CALLER_ID",

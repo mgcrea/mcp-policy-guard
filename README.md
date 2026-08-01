@@ -58,6 +58,35 @@ carried the `Authorization` header is not the request that carries a tool call, 
 principal established at connect time cannot be attributed to the call; mounting it anyway
 would leave a second, unauthenticated door into the same tools.
 
+### Transport options
+
+Because `routes()` builds the SDK's apps, it is also where their arguments go. `app_kwargs`
+and `sse_app_kwargs` are forwarded verbatim; this package does not interpret them.
+
+On **1.x** leave both empty — transport options belong on the server constructor, and the
+builders read them back from `settings`:
+
+```python
+mcp = FastMCP(name=NAME, transport_security=security, streamable_http_path="/mcp")
+app = Starlette(routes=routes(mcp, guard.config))
+```
+
+On **2.x** those options were removed from the constructor and from `Settings`. They survive
+only as arguments to the builders, so they have to come through here:
+
+```python
+app = Starlette(routes=routes(mcp, guard.config, app_kwargs={
+    "transport_security": security,
+    "streamable_http_path": "/mcp",
+}))
+```
+
+Passing nothing on 2.x is a live footgun and the guard logs
+`transport_defaults_to_localhost` when you do: `host` defaults to `127.0.0.1`, which
+auto-enables DNS-rebinding protection with a localhost-only allow-list, so a server behind an
+ingress answers `421 Invalid Host header` to every real request. The guard warns rather than
+choosing for you — quietly widening an allow-list is not a decision a guard should make.
+
 ## Guarding a tool
 
 ```python
@@ -146,6 +175,7 @@ detected at runtime.
 | `@guarded` | **Required.** Reads the SDK's per-message `request_ctx` | Safe no-op; leaves the already-correct binding in place |
 | `GuardServerMiddleware` | Not available (no context-tier middleware) | **Preferred.** One registration covers every tool |
 | Scope-preferred resolution in `evaluate()` | Active | Falls through to the contextvar, which is correct there |
+| Transport options (`transport_security`, `host`, `json_response`, the `*_path` options) | On the server constructor | Removed from the constructor; pass them through `routes(app_kwargs=...)` |
 
 ```python
 # 2.x — one registration, nothing to forget
