@@ -100,6 +100,14 @@ class GuardConfig:
     #: Bounded retries for a PDP call that failed transiently. One timeout with no retry
     #: turns a blip into a user-visible denial.
     policy_retries: int = DEFAULT_POLICY_RETRIES
+    #: Whether the MCP discovery handshake also demands a bearer. Off by default: a client
+    #: that forwards its *caller's* token holds none at startup, when discovery happens, so
+    #: requiring one there hides the server from it entirely rather than protecting
+    #: anything — `tools/call` is refused on its own merits regardless. See
+    #: `mcp_policy_guard.discovery` for the exact allow-list. Turn it on for a server whose
+    #: tool *names* are themselves sensitive, accepting that clients must then be able to
+    #: authenticate at startup.
+    discovery_requires_auth: bool = False
 
     @property
     def policy_enabled(self) -> bool:
@@ -181,4 +189,5 @@ class GuardConfig:
                 _env_float("MCP_POLICY_CACHE_MAX_ENTRIES", DEFAULT_SNAPSHOT_CACHE_MAX_ENTRIES)
             ),
             policy_retries=int(_env_float("MCP_POLICY_RETRIES", DEFAULT_POLICY_RETRIES)),
+            discovery_requires_auth=_env_bool("MCP_DISCOVERY_REQUIRES_AUTH"),
         )

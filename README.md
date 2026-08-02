@@ -25,7 +25,7 @@ endpoints in [Policy decision point contract](#policy-decision-point-contract).
 ## Install
 
 ```toml
-dependencies = ["mcp-policy-guard>=0.3"]
+dependencies = ["mcp-policy-guard>=0.5"]
 ```
 
 ## Wiring a server
@@ -210,6 +210,55 @@ The opposite applies to a query tool: the model already named the table, so ther
 oracle to protect, and an explicit "you do not have access to dbo.payroll" stops it
 retrying.
 
+## The MCP handshake is not authenticated
+
+Distinct from the section above, which is about hiding *resources* from a caller who is
+already known. This is about the protocol handshake — `initialize`, `tools/list` — by which
+a client learns the server exists at all.
+
+Under `MCP_REQUIRE_AUTH` those messages are admitted **without a bearer**. Everything else
+still needs one.
+
+The reason is that a client which forwards its *caller's* token holds no token at startup,
+which is when discovery happens: the token belongs to a request that has not arrived yet.
+Refusing the handshake secures nothing, because `tools/call` is refused on its own merits
+either way. What it does is make the server *invisible* — a runtime that cannot enumerate it
+drops it, usually for the lifetime of the process, and the operator sees a tool that is
+simply absent rather than a tool that said no. Silent on both sides.
+
+Admitted unauthenticated, and nothing else — the list is an allow-list so that a method
+nobody has considered is refused rather than admitted:
+
+`initialize`, `notifications/initialized`, `ping`, `tools/list`, `resources/list`,
+`resources/templates/list`, `prompts/list`
+
+Every one returns names and schemas; none returns row data, file contents, or a side effect.
+`resources/list` is included and `resources/read` is not, for exactly that reason.
+
+Four things worth knowing:
+
+- **A batch is allowed only if every message in it is.** JSON-RPC permits an array, so
+  `[initialize, tools/call]` is one request whose first message looks harmless.
+- **It is a hole in authentication, never in authorization.** No principal is bound on this
+  path, so a handler reached through it still fails every policy check.
+- **`POST` only.** An anonymous `GET` or `DELETE` on `/mcp` is refused. Both carry no
+  JSON-RPC body to classify, and neither is innocuous: a `GET` attaches to the
+  server→client stream of whatever session `Mcp-Session-Id` names and a `DELETE` ends it,
+  so admitting them would put a second unauthenticated door onto an *authenticated*
+  caller's session. Refusing costs discovery nothing — the Python SDK runs its GET stream
+  as a background task whose errors are swallowed and retried, and `terminate_session`
+  tolerates any non-2xx; neither reaches `initialize` or `tools/list`.
+- **An anonymous `initialize` creates a session** on a stateful server. Everything reachable
+  without a bearer is caller-independent, so riding someone else's session id gains nothing,
+  but sessions accumulate — prefer `stateless_http=True`, or seal discovery.
+
+Set `MCP_DISCOVERY_REQUIRES_AUTH=true` to seal it again, for a server whose tool *names* are
+themselves sensitive. Clients must then be able to authenticate at startup, which a
+caller-token-forwarding client cannot.
+
+If your `tools/list` is scoped per caller, decide what an anonymous listing returns before
+leaving discovery open: on this path there is no principal to scope it by.
+
 ## Configuration
 
 **The names are a contract** with whatever provisions this server's environment — renaming
@@ -217,7 +266,8 @@ one on either side silently disables the corresponding control.
 
 | Variable | Meaning |
 | --- | --- |
-| `MCP_REQUIRE_AUTH` | Reject unauthenticated requests. Also disables SSE. |
+| `MCP_REQUIRE_AUTH` | Reject unauthenticated requests. Also disables SSE. The MCP discovery handshake is exempt — see above. |
+| `MCP_DISCOVERY_REQUIRES_AUTH` | Require a bearer for `initialize`/`tools/list` too. Default false. |
 | `MCP_AUTH_ISSUER` | OIDC issuer URL. The JWKS endpoint is resolved from it by discovery. |
 | `MCP_AUTH_AUDIENCE` | Optional `aud` check. Leave unset where one issuer mints tokens for several clients. |
 | `MCP_TOOL_ID` | This server's tool id; how the PDP resolves which policy applies. |
@@ -383,6 +433,21 @@ The identity fields are written last and cannot be overridden by keyword argumen
 `caller_id` is recorded from the caller's own header and is **never used in a policy
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
+
+## Upgrading to 0.5
+
+**`MCP_REQUIRE_AUTH=true` no longer 401s the MCP discovery handshake.** `initialize`,
+`notifications/initialized`, `ping`, `tools/list`, `resources/list`,
+`resources/templates/list` and `prompts/list` are served without a bearer; see "The MCP
+handshake is not authenticated" for why, and for the batch and `POST`-only rules.
+
+Nothing else changes. `tools/call`, `resources/read`, `prompts/get`, any method not on that
+list, an anonymous `GET`/`DELETE`, and a present-but-invalid token are all refused exactly as
+in 0.4. Set `MCP_DISCOVERY_REQUIRES_AUTH=true` to restore 0.4 behaviour byte for byte.
+
+Worth doing before you upgrade: if your server is stateful, an anonymous `initialize` now
+creates a session, so consider `stateless_http=True`. And if `tools/list` is scoped per
+caller, decide what it returns with no principal bound.
 
 ## Upgrading to 0.2
 

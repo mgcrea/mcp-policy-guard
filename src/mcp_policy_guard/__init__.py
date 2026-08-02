@@ -28,6 +28,7 @@ and in a tool handler:
 
 from .audit import audit_call, emit, redact
 from .config import GuardConfig
+from .discovery import DISCOVERY_METHODS
 from .errors import (
     AuthenticationRequired,
     GuardConfigurationError,
@@ -56,9 +57,10 @@ from .request import (
 from .routing import routes
 from .snapshot import PolicySnapshot
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
+    "DISCOVERY_METHODS",
     "SCOPE_CALLER_ID",
     "SCOPE_CORRELATION_ID",
     "SCOPE_PRINCIPAL",

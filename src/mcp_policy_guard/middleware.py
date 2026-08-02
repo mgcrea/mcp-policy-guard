@@ -23,6 +23,7 @@ import anyio.to_thread
 import structlog
 
 from .config import GuardConfig
+from .discovery import MAX_PEEK_BYTES, buffer_body, is_discovery_payload, replay
 from .errors import AuthenticationRequired
 from .jwt_verify import verify_token
 from .principal import (
@@ -103,11 +104,63 @@ class GuardMiddleware:
             reset_caller_id(caller_token)
             reset_correlation_id(correlation_token)
 
+    async def _allow_discovery(self, scope: Scope, receive: Receive, headers: dict[str, str]) -> tuple[bool, Receive]:
+        """Whether this bearer-less request is part of the MCP discovery handshake.
+
+        Returns the `receive` to use downstream alongside the verdict, because classifying a
+        POST means consuming its body and handing back a replay of it.
+
+        **`POST` only.** A `GET` or `DELETE` on `/mcp` carries no JSON-RPC body, so there is
+        no method to classify and the package's rule for input it cannot classify is to
+        refuse. Nor are they free to admit: under streamable HTTP a `GET` attaches to the
+        server→client stream of whatever session `Mcp-Session-Id` names, and a `DELETE` ends
+        it — so admitting them anonymously would put a second, unauthenticated door onto an
+        *authenticated* caller's session, which is the same shape of hole `sse_allowed`
+        already refuses to open. Refusing them costs discovery nothing: in the Python SDK
+        the GET stream is a background task (`tg.start_soon(handle_get_stream, ...)`) whose
+        errors are swallowed and retried, and `terminate_session` logs a warning on any
+        non-2xx; neither failure reaches `initialize` or `tools/list`.
+
+        The refusal stays a 401 rather than a 405 on purpose — an OAuth-capable client
+        branches on 401 to start its auth flow, and reads 405 as "this server has no such
+        endpoint".
+
+        Buffering happens **only here**, on the path that was about to 401 anyway. An
+        authenticated request never touches `receive` and keeps streaming exactly as before.
+        """
+        if str(scope.get("method", "")).upper() != "POST":
+            return False, receive
+
+        # Refuse on the declared length before reading a single byte, so an oversized body
+        # costs nothing to turn away.
+        declared = headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > MAX_PEEK_BYTES:
+            return False, receive
+
+        buffered = await buffer_body(receive, MAX_PEEK_BYTES)
+        if buffered is None:
+            return False, receive
+
+        body, messages = buffered
+        if not is_discovery_payload(body):
+            return False, receive
+        return True, replay(messages, receive)
+
     async def _dispatch(self, scope: Scope, receive: Receive, send: Send, headers: dict[str, str]) -> None:
         token = _bearer(headers)
 
         if token is None:
             if self.config.require_auth:
+                if not self.config.discovery_requires_auth:
+                    allowed, receive = await self._allow_discovery(scope, receive, headers)
+                    if allowed:
+                        # Through with no principal: `scope[SCOPE_PRINCIPAL]` stays None and
+                        # the contextvar stays unset, so a handler reached this way still
+                        # fails every policy check. Discovery is a hole in authentication
+                        # only, never in authorization.
+                        logger.debug("discovery_allowed_unauthenticated", path=scope.get("path"))
+                        await self.app(scope, receive, send)
+                        return
                 await _unauthorized(send, "Missing bearer token")
                 return
             # Not enforcing: no principal, and every later policy check will say so rather

@@ -26,7 +26,7 @@ from starlette.routing import Mount, Route
 from mcp_policy_guard.middleware import GuardMiddleware
 from mcp_policy_guard.routing import routes
 
-from ._mcp_compat import IS_V1, PROTOCOL_VERSION, build_server
+from ._mcp_compat import IS_V1, PROTOCOL_VERSION, build_server, register_tool
 
 
 class FakeServer:
@@ -183,6 +183,119 @@ async def _initialize(client: httpx.AsyncClient, host: str) -> httpx.Response:
             },
         },
     )
+
+
+@contextlib.asynccontextmanager
+async def _serve_enforcing(config):
+    """A real enforcing server, driven over the wire, on the **SSE** response path.
+
+    Deliberately does not set `json_response`: `EventSourceResponse` is what the SDK returns
+    from `POST /mcp` by default, and it is the only path that runs a disconnect listener
+    concurrently with the body. A replay that fabricated an `http.disconnect` once its
+    buffer drained would cancel that response mid-flight, and every unit test in
+    `test_middleware.py` would still pass. This is the one that would not.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+    mcp = build_server("discovery-probe")
+
+    def probe_tool() -> str:
+        return "ok"
+
+    register_tool(mcp, "probe_tool", probe_tool)
+
+    if IS_V1:
+        mcp.settings.transport_security = security
+        app = Starlette(routes=routes(mcp, config))
+    else:
+        app = Starlette(routes=routes(mcp, config, app_kwargs={"transport_security": security}))
+
+    inner = app.routes[-1].app.app
+    async with inner.router.lifespan_context(inner):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://probe.test") as client:
+            yield client
+
+
+_MCP_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+
+
+class TestAnonymousDiscoveryEndToEnd:
+    """The handshake an agent runtime actually performs, with no bearer, against a real server.
+
+    Worth more than the unit tests: it is the only thing here that exercises the SDK's own
+    response machinery, which is where a plausible-looking replay goes wrong.
+    """
+
+    async def test_completes_the_handshake_and_lists_tools(self, config):
+        async with _serve_enforcing(config) as client:
+            initialize = await client.post(
+                "/mcp",
+                headers=_MCP_HEADERS,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {"name": "discovery-probe", "version": "1"},
+                    },
+                },
+            )
+            assert initialize.status_code == 200
+            # Non-empty is the assertion that matters: a cancelled EventSourceResponse
+            # returns 200 with nothing in it.
+            assert initialize.text.strip()
+            assert "protocolVersion" in initialize.text
+
+            session_id = initialize.headers.get("mcp-session-id")
+            session_headers = {**_MCP_HEADERS}
+            if session_id:
+                session_headers["mcp-session-id"] = session_id
+
+            initialized = await client.post(
+                "/mcp",
+                headers=session_headers,
+                json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+            )
+            assert initialized.status_code == 202
+
+            listed = await client.post(
+                "/mcp",
+                headers=session_headers,
+                json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            )
+            assert listed.status_code == 200
+            assert "probe_tool" in listed.text
+
+    async def test_still_refuses_the_tool_call_that_discovery_advertised(self, config):
+        async with _serve_enforcing(config) as client:
+            response = await client.post(
+                "/mcp",
+                headers=_MCP_HEADERS,
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "probe_tool"}},
+            )
+        assert response.status_code == 401
+
+    async def test_still_refuses_a_batch_smuggling_a_tool_call(self, config):
+        async with _serve_enforcing(config) as client:
+            response = await client.post(
+                "/mcp",
+                headers=_MCP_HEADERS,
+                json=[
+                    {"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                    {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "probe_tool"}},
+                ],
+            )
+        assert response.status_code == 401
+
+    async def test_still_refuses_an_anonymous_stream_attach(self, config):
+        async with _serve_enforcing(config) as client:
+            response = await client.get("/mcp", headers=_MCP_HEADERS)
+        assert response.status_code == 401
 
 
 @pytest.mark.skipif(IS_V1, reason="only 2.x moved transport options onto the app builders")
