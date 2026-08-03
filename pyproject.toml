@@ -1,6 +1,6 @@
 [project]
 name = "mcp-policy-guard"
-version = "0.5.0"
+version = "0.5.1"
 license = "MIT"
 description = "Per-caller authentication and authorization for MCP servers"
 requires-python = ">=3.12"

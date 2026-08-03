@@ -39,10 +39,16 @@ from mcp_policy_guard import Guard, routes
 
 guard = Guard()
 
-app = Starlette(routes=routes(mcp, guard.config, extra_routes=[
-    Route("/healthz", healthz),
-    Route("/", root),
-]))
+app = Starlette(
+    routes=routes(
+        mcp,
+        guard.config,
+        extra_routes=[
+            Route("/healthz", healthz),
+            Route("/", root),
+        ],
+    )
+)
 ```
 
 `routes()` mounts the guarded streamable app at the catch-all and SSE — only when
@@ -75,10 +81,16 @@ On **2.x** those options were removed from the constructor and from `Settings`. 
 only as arguments to the builders, so they have to come through here:
 
 ```python
-app = Starlette(routes=routes(mcp, guard.config, app_kwargs={
-    "transport_security": security,
-    "streamable_http_path": "/mcp",
-}))
+app = Starlette(
+    routes=routes(
+        mcp,
+        guard.config,
+        app_kwargs={
+            "transport_security": security,
+            "streamable_http_path": "/mcp",
+        },
+    )
+)
 ```
 
 Passing nothing on 2.x is a live footgun and the guard logs
@@ -92,15 +104,17 @@ choosing for you — quietly widening an allow-list is not a decision a guard sh
 ```python
 from mcp_policy_guard import PolicyDenied, Resource, audit_call, guarded
 
+
 @mcp.tool()
 @guarded
 async def mssql_query(query: str) -> str:
     return await asyncio.to_thread(_sync_query, query)
 
+
 def _sync_query(query: str) -> str:
     with audit_call("mssql_query", {"query": query}) as record:
-        validate_readonly_query(query)                 # deny-list, unchanged
-        tables = extract_referenced_tables(query)      # allow-list input
+        validate_readonly_query(query)  # deny-list, unchanged
+        tables = extract_referenced_tables(query)  # allow-list input
         record["resources"] = sorted(tables)
 
         try:
@@ -140,7 +154,7 @@ from mcp_policy_guard import UNDETERMINED
 try:
     tables = extract_referenced_tables(query)
 except TableExtractionError:
-    guard.require("mssql_query", UNDETERMINED)   # denies while enforcing, and audits why
+    guard.require("mssql_query", UNDETERMINED)  # denies while enforcing, and audits why
 ```
 
 ## Why two pieces
@@ -294,6 +308,13 @@ do nothing:
 expire before they were ever revalidated, and the guard would fail closed on every call after
 the first while looking like a PDP outage.
 
+Setting **neither** `MCP_REQUIRE_AUTH` nor `MCP_AUTH_ISSUER` starts, but logs a
+`guard_unconfigured` warning. The guard is then inert: every request is served
+unauthenticated, and a bearer presented by a caller is ignored rather than refused. That is
+the state a server is in the moment it adds the dependency, so it cannot be an error — but
+from the outside it is indistinguishable from a guard that is working, which is why it is not
+silent either.
+
 Both header names are lowercased when read, because ASGI hands header names down lowercased
 — so `X-Trace-Id` and `x-trace-id` behave identically.
 
@@ -433,6 +454,26 @@ The identity fields are written last and cannot be overridden by keyword argumen
 `caller_id` is recorded from the caller's own header and is **never used in a policy
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
+
+## Upgrading to 0.5.1
+
+**An unconfigured guard now ignores a bearer instead of refusing it.** With neither
+`MCP_REQUIRE_AUTH` nor `MCP_AUTH_ISSUER` set, a request carrying `Authorization: Bearer …`
+used to be answered `401 {"error":"unauthorized","reason":"Guard has no issuer configured"}`,
+while the same request without the header was served normally. Any caller in the habit of
+sending a token it did not strictly need — an API key for some other hop, a leftover header —
+broke the moment a server picked up the guard, typically through an automatic dependency
+update rather than a decision anyone made.
+
+A missing issuer is a property of the deployment, not a defect in the caller's token: with no
+JWKS there is nothing to check it against, so there is no judgement to report. The request is
+now treated exactly as it would have been had the header been absent, and no principal is
+bound — so every policy check still fails closed.
+
+This narrows only the *unconfigured* case. Once `MCP_AUTH_ISSUER` is set the guard can judge
+a token, and a present-but-invalid one is still refused whether or not `MCP_REQUIRE_AUTH` is
+on — unchanged from 0.5.0. The new `guard_unconfigured` startup warning names the inert state
+so it stops being invisible.
 
 ## Upgrading to 0.5
 

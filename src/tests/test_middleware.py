@@ -6,6 +6,7 @@ import json
 from dataclasses import replace
 
 import pytest
+from structlog.testing import capture_logs
 
 from mcp_policy_guard.config import DEFAULT_STALE_MAX_SECONDS, GuardConfig
 from mcp_policy_guard.discovery import MAX_PEEK_BYTES
@@ -228,6 +229,67 @@ class TestNotEnforcing:
             {"Authorization": f"Bearer {make_token()}"},
         )
         assert app.subject == "user-a-sub"
+
+
+class TestUnconfigured:
+    """A guard linked into a server that nobody has configured yet.
+
+    Distinct from `TestNotEnforcing`, where an issuer *is* set and the guard can still judge
+    a token. With no issuer there is no JWKS and no judgement to make, so a bearer is not
+    "invalid" — it is unjudgeable, and the request is exactly the one it would have been had
+    the header never been sent.
+
+    Regression cover for the outage of 2026-08-03: a tool image picked up the guard through
+    an automatic dependency update, and every caller that had been harmlessly sending an
+    unused `sk-` key started getting `401 Guard has no issuer configured` while
+    bearer-less callers were served normally.
+    """
+
+    @pytest.fixture
+    def unconfigured(self, config) -> GuardConfig:
+        return replace(config, require_auth=False, issuer=None, policy_url=None, tool_id=None)
+
+    async def test_ignores_a_present_bearer_instead_of_refusing_it(self, unconfigured):
+        app = RecordingApp()
+        status, _, _ = await call(GuardMiddleware(app, unconfigured), {"Authorization": "Bearer sk-some-api-key"})
+        assert status == 200
+        assert app.calls == 1
+        # Ignored, never trusted: an unconfigured guard verifies nothing, so it must not
+        # leave a principal behind for a policy check to match on.
+        assert app.subject is None
+
+    async def test_ignores_a_jwt_shaped_bearer_too(self, unconfigured, make_token):
+        # The token's shape is irrelevant — without an issuer there is nothing to check it
+        # against, so a real Keycloak JWT gets the same treatment as an opaque key. This is
+        # the assertion that answers "would switching to a proper JWT have fixed it?".
+        app = RecordingApp()
+        status, _, _ = await call(GuardMiddleware(app, unconfigured), {"Authorization": f"Bearer {make_token()}"})
+        assert status == 200
+        assert app.subject is None
+
+    async def test_ignores_the_oauth2_proxy_forwarded_token(self, unconfigured, make_token):
+        app = RecordingApp()
+        status, _, _ = await call(GuardMiddleware(app, unconfigured), {"X-Auth-Request-Access-Token": make_token()})
+        assert status == 200
+        assert app.subject is None
+
+    async def test_a_bearer_less_request_is_unaffected(self, unconfigured):
+        app = RecordingApp()
+        status, _, _ = await call(GuardMiddleware(app, unconfigured))
+        assert status == 200
+        assert app.subject is None
+
+    async def test_a_configured_guard_still_refuses_a_bad_token(self, config):
+        # The companion to the above, pinned here so the fix cannot later be widened into
+        # "ignore tokens we fail to verify". With an issuer present the guard *can* judge,
+        # and a token it rejects is still a 401 whether or not it is enforcing.
+        app = RecordingApp()
+        status, _, _ = await call(
+            GuardMiddleware(app, replace(config, require_auth=False)),
+            {"Authorization": "Bearer nonsense"},
+        )
+        assert status == 401
+        assert app.calls == 0
 
 
 class TestNonHttpScopes:
@@ -493,6 +555,25 @@ class TestConfigFromEnv:
         for key in ("MCP_REQUIRE_AUTH", "MCP_AUTH_ISSUER", "MCP_POLICY_FAIL_MODE"):
             monkeypatch.delenv(key, raising=False)
         assert GuardConfig.from_env().fail_mode == "closed"
+
+    def test_warns_when_loaded_with_no_configuration_at_all(self, monkeypatch):
+        # Legal, and the state a server is in the moment it adds the dependency — but from
+        # the outside indistinguishable from a guard that is working, so it must not be
+        # silent. This warning is the only signal that the tool is serving everyone.
+        for key in ("MCP_REQUIRE_AUTH", "MCP_AUTH_ISSUER"):
+            monkeypatch.delenv(key, raising=False)
+        with capture_logs() as logs:
+            config = GuardConfig.from_env()
+        assert config.require_auth is False
+        assert config.issuer is None
+        assert [entry for entry in logs if entry["event"] == "guard_unconfigured"]
+
+    def test_does_not_warn_once_an_issuer_is_configured(self, monkeypatch):
+        monkeypatch.delenv("MCP_REQUIRE_AUTH", raising=False)
+        monkeypatch.setenv("MCP_AUTH_ISSUER", "https://idp.test/realms/demo")
+        with capture_logs() as logs:
+            GuardConfig.from_env()
+        assert not [entry for entry in logs if entry["event"] == "guard_unconfigured"]
 
     def test_rejects_a_fail_mode_it_does_not_understand(self, monkeypatch):
         # Not "fall back to closed and warn": a typo in a security-relevant setting must be

@@ -149,6 +149,26 @@ class GuardMiddleware:
     async def _dispatch(self, scope: Scope, receive: Receive, send: Send, headers: dict[str, str]) -> None:
         token = _bearer(headers)
 
+        if token is not None and not self.config.require_auth and not self.config.issuer:
+            # An unconfigured guard has no opinion about a token it was never given the means
+            # to check. Falling through to `verify_token` would refuse it with "Guard has no
+            # issuer configured" — a *deployment* state reported as if the caller's token were
+            # at fault, and a hard 401 for a header this server never asked for.
+            #
+            # This is not the "present but invalid" case below. That one presumes a guard that
+            # *can* judge a token and found it wanting; here there is no issuer, no JWKS and no
+            # judgement to make, so the only honest reading of the request is the one it would
+            # have got had the header been absent. `require_auth` is off, so nothing is being
+            # enforced either way, and no principal is bound — every policy check still fails
+            # closed.
+            #
+            # Silently dropping a bearer would be the wrong default for a guard that *is*
+            # configured, which is why this is narrowed to `not issuer`. See the startup
+            # warning in `GuardConfig.from_env`: this state is legitimate but worth saying out
+            # loud, because it means the tool is serving every caller unauthenticated.
+            logger.debug("unconfigured_guard_ignored_bearer", path=scope.get("path"))
+            token = None
+
         if token is None:
             if self.config.require_auth:
                 if not self.config.discovery_requires_auth:

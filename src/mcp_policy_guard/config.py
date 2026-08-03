@@ -13,8 +13,12 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
+import structlog
+
 from .errors import GuardConfigurationError
 from .principal import DEFAULT_CALLER_ID_HEADER, DEFAULT_CORRELATION_HEADER
+
+logger = structlog.get_logger()
 
 FailMode = Literal["closed", "open"]
 
@@ -143,6 +147,21 @@ class GuardConfig:
                 "MCP_REQUIRE_AUTH is true but MCP_AUTH_ISSUER is unset — the guard has no "
                 "JWKS endpoint and could not verify any token. Refusing to start rather "
                 "than accept every caller while appearing to enforce."
+            )
+
+        if not require_auth and not issuer:
+            # Legitimate — a server may be linked against the guard before anyone configures
+            # it — but worth saying out loud once at startup, because from the outside it is
+            # indistinguishable from a guard that is working. Every caller is served
+            # unauthenticated, and the operator most likely to be misled is the one who added
+            # the dependency expecting it to start protecting something.
+            logger.warning(
+                "guard_unconfigured",
+                detail=(
+                    "Neither MCP_REQUIRE_AUTH nor MCP_AUTH_ISSUER is set — the guard is "
+                    "loaded but inert: every request is served unauthenticated and any "
+                    "bearer presented is ignored. Set both to enforce."
+                ),
             )
 
         raw_fail_mode = (_env_str("MCP_POLICY_FAIL_MODE") or "closed").lower()
