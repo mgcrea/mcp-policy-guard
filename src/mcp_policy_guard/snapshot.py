@@ -45,11 +45,32 @@ def raise_if_refused(status_code: int, what: str) -> None:
 
 
 @dataclass(frozen=True)
+class SnapshotFilter:
+    """A row predicate carried on a snapshot row, values already resolved for this caller.
+
+    `pattern` is **not** redundant with the row's own. A rule allowing `dbo.*` may carry a
+    predicate that narrows only `dbo.perfevents`, and both end up on the same flattened row —
+    so this pattern is re-checked against the resource in hand, or reading `dbo.orders` would
+    silently acquire a predicate meant for another table.
+    """
+
+    kind: str
+    pattern: str
+    column: str
+    operator: str
+    values: tuple[str, ...]
+
+    def covers(self, kind: str, value: str) -> bool:
+        return self.kind == kind and glob_matches(self.pattern, value)
+
+
+@dataclass(frozen=True)
 class ResourceRule:
     kind: str
     pattern: str
     effect: str
     rule_id: str
+    filters: tuple[SnapshotFilter, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +91,17 @@ class PolicySnapshot:
                 pattern=str(entry["pattern"]),
                 effect=str(entry["effect"]),
                 rule_id=str(entry["ruleId"]),
+                # Absent on a snapshot from an older platform, and on any row nothing narrows.
+                filters=tuple(
+                    SnapshotFilter(
+                        kind=str(entry["kind"]),
+                        pattern=str(raw.get("pattern", entry["pattern"])),
+                        column=str(raw["column"]),
+                        operator=str(raw["operator"]),
+                        values=tuple(str(value) for value in raw.get("values", [])),
+                    )
+                    for raw in entry.get("filters", []) or []
+                ),
             )
             for entry in payload.get("resourceRules", [])
         )
@@ -85,10 +117,26 @@ class PolicySnapshot:
 
     def decide_resource(self, kind: str, value: str) -> tuple[str, str | None]:
         """`(effect, rule_id)` for one resource. First matching row wins."""
+        rule = self._match(kind, value)
+        return (rule.effect, rule.rule_id) if rule else (self.default_effect, None)
+
+    def filters_for(self, kind: str, value: str) -> tuple[SnapshotFilter, ...]:
+        """The predicates the winning row imposes on this resource, if any.
+
+        Read off the **same** row `decide_resource` returns, never scanned across the table:
+        a predicate belongs to the rule that granted the resource, and picking one up from a
+        row that did not decide anything would apply a narrowing nobody authored for it.
+        """
+        rule = self._match(kind, value)
+        if rule is None or rule.effect != "allow":
+            return ()
+        return tuple(f for f in rule.filters if f.covers(kind, value))
+
+    def _match(self, kind: str, value: str) -> ResourceRule | None:
         for rule in self.resource_rules:
             if rule.kind == kind and glob_matches(rule.pattern, value):
-                return rule.effect, rule.rule_id
-        return self.default_effect, None
+                return rule
+        return None
 
     def allows(self, kind: str, value: str) -> bool:
         return self.decide_resource(kind, value)[0] == "allow"

@@ -157,6 +157,44 @@ except TableExtractionError:
     guard.require("mssql_query", UNDETERMINED)  # denies while enforcing, and audits why
 ```
 
+## An allow can come with obligations
+
+Since **0.6.0** a decision may carry row predicates: the resource is allowed, but only the
+rows matching a column condition may be returned. This is how one rule serves every district
+manager — the PDP resolves the caller's own districts and sends literals, so the tool worker
+looks nothing up and cannot resolve it differently from the platform.
+
+```python
+decision = guard.require("mssql_query", [Resource("sql_table", t) for t in tables])
+
+for table in tables:
+    for row_filter in decision.filters_for(Resource("sql_table", table)):
+        # row_filter.column == "District", .operator == "in_", .values == ("D775",)
+        query = narrow(query, table, row_filter)
+```
+
+`decision.filters` is every predicate on the call; `filters_for(resource)` is the subset for
+one resource, because a single query may narrow several tables differently. `operator` is
+`in_`, `not_in` or `eq`. There is no attribute key to resolve and no lookup to perform.
+
+**Ignoring a predicate is a breach, not a degradation.** A tool that returns every row after
+being told to narrow them produces a response indistinguishable from a correctly scoped one:
+no error, and an audit row that says allow. Two consequences for anyone implementing this:
+
+1. **If you cannot apply a predicate, refuse the call.** Not "return everything" and not
+   "return nothing quietly" — raise, so the failure is visible.
+2. **You do not have to opt in, but you do have to look.** `filters` is empty on a call
+   nothing narrows and on an older platform that sends none, so a tool written before 0.6.0
+   keeps compiling — and keeps silently over-returning the moment someone authors a filter
+   against it. That is why the platform refuses to send predicates to a guard below 0.6.0 at
+   all, and denies the resources they would have narrowed instead. Upgrading this package is
+   what makes those grants start working.
+
+Predicates survive a PDP outage: they are carried on the cached snapshot rows and re-checked
+against the resource in hand. Without that, an unreachable backend would turn every scoped
+query into a full-table read — the exact failure this exists to prevent, arriving through the
+fallback rather than through a rule.
+
 ## Why two pieces
 
 The ASGI middleware knows exactly who is calling — but on MCP SDK 1.x a tool handler does not
@@ -375,6 +413,18 @@ Authorization: Bearer <the caller's access token>
   "resourceDecisions": [{"resource": {"kind": "sql_table", "value": "dbo.orders"}, "effect": "allow"}] }
 ```
 
+An allowed resource may carry `filters`, which become `Decision.filters` (0.6.0+). Values are
+already resolved for this caller — there is never an attribute key on the wire:
+
+```json
+{ "resource": {"kind": "sql_table", "value": "dbo.perfevents"},
+  "effect": "allow",
+  "filters": [{"column": "District", "operator": "in_", "values": ["D775"]}] }
+```
+
+A denied resource never carries one, and this package ignores any that appears there: reading
+a predicate off a denial would be a way to turn a deny into a filtered allow.
+
 `decision` is what policy says and is what gets audited; `effect` is what the caller should
 *do*. In shadow mode they differ — `effect` is always `allow` — which is what makes it
 possible to author rules against production traffic without blocking anyone.
@@ -396,7 +446,10 @@ unchanged and re-stamps freshness.
   "defaultEffect": "deny",
   "resourceRules": [
     {"kind": "sql_table", "pattern": "dbo.orders*", "effect": "allow", "ruleId": "rule-sales"},
-    {"kind": "sql_table", "pattern": "dbo.payroll*", "effect": "deny", "ruleId": "rule-payroll"}
+    {"kind": "sql_table", "pattern": "dbo.payroll*", "effect": "deny", "ruleId": "rule-payroll"},
+    {"kind": "sql_table", "pattern": "dbo.*", "effect": "allow", "ruleId": "rule-perf",
+     "filters": [{"kind": "sql_table", "pattern": "dbo.perfevents",
+                  "column": "District", "operator": "in_", "values": ["D775"]}]}
   ],
   "callEffect": "allow",
   "callRuleId": "rule-sales" }
@@ -407,7 +460,14 @@ Two obligations on whoever implements this:
 1. **The snapshot is already filtered to the caller.** It is cached under the caller's
    identity fingerprint; a snapshot that was not caller-specific would hand one user's
    permissions to another.
-2. **`resourceRules` is already precedence-flattened.** Subject matching, priority ordering
+2. **A filter carries its own pattern, narrower than the row's.** A rule allowing `dbo.*` may
+   narrow only `dbo.perfevents`, and both land on the same flattened row — so the filter's
+   pattern is re-checked against the resource in hand. Skip that and reading `dbo.orders`
+   silently acquires a predicate meant for another table.
+3. **An attribute that resolved to nothing arrives as a `deny` row, not as an empty filter.**
+   The platform emits it ahead of the rule's own allow, so a caller holding no districts sees
+   no rows during an outage too. Never read an empty `values` as "unfiltered".
+4. **`resourceRules` is already precedence-flattened.** Subject matching, priority ordering
    and the deny-wins tiebreak are resolved server-side, because this package walks the list
    first-match-wins and will not re-sort it. Glob semantics must match
    [matching.py](src/mcp_policy_guard/matching.py) — `test_matching.py` pins the shared cases.
@@ -454,6 +514,23 @@ The identity fields are written last and cannot be overridden by keyword argumen
 `caller_id` is recorded from the caller's own header and is **never used in a policy
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
+
+## Upgrading to 0.6
+
+**A decision can now carry row predicates, and ignoring them over-returns silently.** See
+[An allow can come with obligations](#an-allow-can-come-with-obligations). Nothing breaks on
+upgrade: `Decision.filters` is empty for every call nothing narrows, so a tool that never
+looks at it behaves exactly as it did.
+
+What changes is on the platform side. It refuses to hand a predicate to a guard below 0.6.0 —
+an older guard drops it and returns every row, which is indistinguishable from a scoped read —
+and denies the resources the predicate would have narrowed instead. So a rule with a row
+filter authored against a tool still on 0.5.x **denies** rather than over-returning, and the
+denial names the version. Upgrading this package is what turns those grants on; applying the
+predicates in the tool is what makes them correct.
+
+The guard reports its version in the `User-Agent` on every PDP call, which is how the platform
+knows. A tool that has never called the PDP counts as too old.
 
 ## Upgrading to 0.5.1
 

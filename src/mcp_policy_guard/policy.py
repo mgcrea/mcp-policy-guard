@@ -68,6 +68,32 @@ class Resource:
         return f"{self.kind}:{self.value}"
 
 
+def _filters_from(resource_decisions: Iterable[dict[str, Any]]) -> tuple[RowFilter, ...]:
+    """Row predicates out of a decision body.
+
+    Only ALLOWED resources can carry one: a denied resource yields no rows to narrow, and
+    reading a predicate off a denial would be a way to turn a deny into a filtered allow.
+
+    A body with no `filters` anywhere — an older platform, or simply a call nothing narrows —
+    produces an empty tuple and the tool behaves exactly as it did before predicates existed.
+    """
+    filters: list[RowFilter] = []
+    for entry in resource_decisions:
+        if entry.get("effect") != "allow":
+            continue
+        resource = Resource(kind=str(entry["resource"]["kind"]), value=str(entry["resource"]["value"]))
+        for raw in entry.get("filters", []) or []:
+            filters.append(
+                RowFilter(
+                    resource=resource,
+                    column=str(raw["column"]),
+                    operator=str(raw["operator"]),
+                    values=tuple(str(value) for value in raw.get("values", [])),
+                )
+            )
+    return tuple(filters)
+
+
 class _Undetermined:
     """Sentinel: the read set could not be established.
 
@@ -91,6 +117,25 @@ MAX_RESOURCES_PER_CALL = 200
 
 
 @dataclass(frozen=True)
+class RowFilter:
+    """A predicate the caller must apply to one resource before returning its rows.
+
+    Values arrive **already resolved for this caller** — the PDP substitutes them, so there is
+    no attribute key here and nothing for a tool worker to look up or get wrong. `resource`
+    names what the predicate applies to, in the same `kind:value` vocabulary the decision uses,
+    because one call may narrow several tables differently.
+
+    A tool that receives these and ignores them returns unscoped rows, which is why the PDP
+    refuses to send them at all to a guard older than the release that added this class.
+    """
+
+    resource: Resource
+    column: str
+    operator: str
+    values: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class Decision:
     decision: str
     effect: str
@@ -99,6 +144,13 @@ class Decision:
     policy_version: int | None = None
     matched_rule_id: str | None = None
     denied_resources: tuple[Resource, ...] = ()
+    #: Predicates that MUST be applied to the allowed resources. Empty when nothing narrows
+    #: them. A tool that cannot apply one must refuse the call rather than return everything.
+    filters: tuple[RowFilter, ...] = ()
+
+    def filters_for(self, resource: Resource) -> tuple[RowFilter, ...]:
+        """Every predicate that applies to one resource."""
+        return tuple(f for f in self.filters if f.resource == resource)
 
     @property
     def allowed(self) -> bool:
@@ -266,6 +318,7 @@ class Guard:
                 policy_version=body.get("policyVersion"),
                 matched_rule_id=body.get("matchedRuleId"),
                 denied_resources=denied,
+                filters=_filters_from(body.get("resourceDecisions", [])),
             )
         except (ValueError, KeyError, TypeError, AttributeError) as exc:
             # A malformed body is neither an `httpx.HTTPError` nor a `PolicyDenied`, so left
@@ -296,6 +349,7 @@ class Guard:
 
         denied: list[Resource] = []
         matched: str | None = None
+        filters: list[RowFilter] = []
         for resource in resources:
             effect, rule_id = snapshot.decide_resource(resource.kind, resource.value)
             if effect == "deny":
@@ -303,6 +357,22 @@ class Guard:
                 # Report the FIRST denial, matching the backend's evaluator.
                 if matched is None:
                     matched = rule_id
+                continue
+
+            # Predicates survive the outage too. Without this an unreachable PDP would turn
+            # every scoped query into a full-table read — the failure the whole layer exists
+            # to prevent, arriving through the fallback rather than through a rule. The
+            # backend flattens an unresolvable predicate into a `deny` row, so a caller whose
+            # attribute is empty is already handled by the branch above.
+            filters.extend(
+                RowFilter(
+                    resource=resource,
+                    column=snapshot_filter.column,
+                    operator=snapshot_filter.operator,
+                    values=snapshot_filter.values,
+                )
+                for snapshot_filter in snapshot.filters_for(resource.kind, resource.value)
+            )
 
         # Every requested resource must be allowed. One unmatched resource denies the whole
         # call — a query joining Orders and Payroll *is* a Payroll read, and deciding
@@ -316,6 +386,7 @@ class Guard:
             policy_version=snapshot.version,
             matched_rule_id=matched,
             denied_resources=tuple(denied),
+            filters=() if denied else tuple(filters),
         )
 
     def require(

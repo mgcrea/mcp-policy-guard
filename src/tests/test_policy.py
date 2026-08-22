@@ -225,3 +225,138 @@ class TestDiscoveryFiltering:
             key=lambda row: f"dbo.{row[0].lower()}",
         )
         assert visible == [("Orders", 100)]
+
+
+class TestRowFilters:
+    """Predicates the caller must apply before returning rows.
+
+    A tool that receives one and ignores it returns every row, and the result is
+    indistinguishable from a correctly scoped one — so these paths matter more than their
+    line count suggests.
+    """
+
+    def test_carries_the_predicate_off_an_allowed_resource(self, config):
+        body = evaluate_body(
+            resourceDecisions=[
+                {
+                    "resource": {"kind": "sql_table", "value": "dbo.perfevents"},
+                    "effect": "allow",
+                    "matchedRuleId": "rule-districts",
+                    "filters": [{"column": "district", "operator": "in_", "values": ["D775"]}],
+                }
+            ]
+        )
+        g = guard(config, lambda request: httpx.Response(200, json=body))
+        set_principal(USER_A)
+
+        decision = g.evaluate("mssql_query", [Resource("sql_table", "dbo.perfevents")])
+
+        assert len(decision.filters) == 1
+        applied = decision.filters[0]
+        assert (applied.column, applied.operator, applied.values) == ("district", "in_", ("D775",))
+        assert applied.resource == Resource("sql_table", "dbo.perfevents")
+
+    def test_never_reads_a_predicate_off_a_denial(self, config):
+        # A denied resource yields no rows to narrow, and honouring a predicate on one would
+        # be a way to turn a deny into a filtered allow.
+        body = evaluate_body(
+            decision="deny",
+            effect="deny",
+            resourceDecisions=[
+                {
+                    "resource": {"kind": "sql_table", "value": "dbo.payroll"},
+                    "effect": "deny",
+                    "matchedRuleId": "rule-payroll",
+                    "filters": [{"column": "district", "operator": "in_", "values": ["D775"]}],
+                }
+            ],
+        )
+        g = guard(config, lambda request: httpx.Response(200, json=body))
+        set_principal(USER_A)
+
+        assert g.evaluate("mssql_query", [PAYROLL]).filters == ()
+
+    def test_a_body_without_filters_yields_none(self, config):
+        # An older platform, or simply a call nothing narrows. The tool must behave exactly as
+        # it did before predicates existed.
+        g = guard(config, lambda request: httpx.Response(200, json=evaluate_body()))
+        set_principal(USER_A)
+
+        assert g.evaluate("mssql_query", [ORDERS]).filters == ()
+
+    def test_filters_for_selects_by_resource(self, config):
+        body = evaluate_body(
+            resourceDecisions=[
+                {
+                    "resource": {"kind": "sql_table", "value": "dbo.perfevents"},
+                    "effect": "allow",
+                    "matchedRuleId": "r1",
+                    "filters": [{"column": "district", "operator": "in_", "values": ["D775"]}],
+                },
+                {
+                    "resource": {"kind": "sql_table", "value": "dbo.orders"},
+                    "effect": "allow",
+                    "matchedRuleId": "r2",
+                    "filters": [],
+                },
+            ]
+        )
+        g = guard(config, lambda request: httpx.Response(200, json=body))
+        set_principal(USER_A)
+
+        decision = g.evaluate("mssql_query", [Resource("sql_table", "dbo.perfevents"), ORDERS])
+
+        assert len(decision.filters_for(Resource("sql_table", "dbo.perfevents"))) == 1
+        assert decision.filters_for(ORDERS) == ()
+
+    def test_predicates_survive_a_pdp_outage(self, config):
+        # Without this, an unreachable PDP turns every scoped query into a full-table read —
+        # the exact failure this layer exists to prevent, arriving through the fallback.
+        snapshot = snapshot_body(
+            resourceRules=[
+                {
+                    "kind": "sql_table",
+                    "pattern": "dbo.perfevents",
+                    "effect": "allow",
+                    "ruleId": "rule-districts",
+                    "filters": [
+                        {
+                            "pattern": "dbo.perfevents",
+                            "column": "district",
+                            "operator": "in_",
+                            "values": ["D775"],
+                        }
+                    ],
+                }
+            ]
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/snapshot"):
+                return httpx.Response(200, json=snapshot)
+            raise httpx.ConnectError("PDP down")
+
+        g = guard(config, handler, policy_retries=0)
+        set_principal(USER_A)
+
+        decision = g.evaluate("mssql_query", [Resource("sql_table", "dbo.perfevents")])
+
+        assert decision.allowed
+        assert decision.filters[0].values == ("D775",)
+
+    def test_an_outage_denial_carries_no_predicates(self, config):
+        snapshot = snapshot_body(
+            resourceRules=[{"kind": "sql_table", "pattern": "dbo.payroll", "effect": "deny", "ruleId": "rule-payroll"}]
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/snapshot"):
+                return httpx.Response(200, json=snapshot)
+            raise httpx.ConnectError("PDP down")
+
+        g = guard(config, handler, policy_retries=0)
+        set_principal(USER_A)
+
+        decision = g.evaluate("mssql_query", [PAYROLL])
+        assert not decision.allowed
+        assert decision.filters == ()

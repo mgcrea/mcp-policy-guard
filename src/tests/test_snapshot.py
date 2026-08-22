@@ -236,3 +236,61 @@ class TestDecisions:
         )
         # A schema grant is not a table grant.
         assert snapshot.allows("sql_table", "dbo.orders") is False
+
+
+class TestSnapshotFilters:
+    def test_reads_predicates_off_the_row_that_decided(self, config):
+        snapshot = PolicySnapshot.from_json(
+            snapshot_body(
+                resourceRules=[
+                    {
+                        "kind": "sql_table",
+                        "pattern": "dbo.*",
+                        "effect": "allow",
+                        "ruleId": "r1",
+                        "filters": [
+                            {
+                                "pattern": "dbo.perfevents",
+                                "column": "district",
+                                "operator": "in_",
+                                "values": ["D775"],
+                            }
+                        ],
+                    }
+                ]
+            )
+        )
+
+        # The filter's own pattern is narrower than the row's, and must be re-checked: a rule
+        # allowing `dbo.*` may carry a predicate that narrows only one of the tables it covers.
+        assert len(snapshot.filters_for("sql_table", "dbo.perfevents")) == 1
+        assert snapshot.filters_for("sql_table", "dbo.orders") == ()
+
+    def test_never_returns_predicates_for_a_denied_resource(self, config):
+        snapshot = PolicySnapshot.from_json(
+            snapshot_body(
+                resourceRules=[
+                    {
+                        "kind": "sql_table",
+                        "pattern": "dbo.payroll",
+                        "effect": "deny",
+                        "ruleId": "r1",
+                        "filters": [
+                            {
+                                "pattern": "dbo.payroll",
+                                "column": "district",
+                                "operator": "in_",
+                                "values": ["D775"],
+                            }
+                        ],
+                    }
+                ]
+            )
+        )
+
+        assert snapshot.filters_for("sql_table", "dbo.payroll") == ()
+
+    def test_a_row_without_filters_parses_as_before(self, config):
+        snapshot = PolicySnapshot.from_json(snapshot_body())
+        assert snapshot.filters_for("sql_table", "dbo.orders") == ()
+        assert snapshot.decide_resource("sql_table", "dbo.orders") == ("allow", "rule-sales")

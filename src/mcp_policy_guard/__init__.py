@@ -37,7 +37,7 @@ from .errors import (
     PolicyUnavailable,
 )
 from .middleware import GuardMiddleware
-from .policy import UNDETERMINED, Decision, Guard, Resource
+from .policy import UNDETERMINED, Decision, Guard, Resource, RowFilter
 from .principal import (
     Principal,
     current_caller_id,
@@ -55,9 +55,9 @@ from .request import (
     is_guarded,
 )
 from .routing import routes
-from .snapshot import PolicySnapshot
+from .snapshot import PolicySnapshot, SnapshotFilter
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 __all__ = [
     "DISCOVERY_METHODS",
@@ -75,7 +75,9 @@ __all__ = [
     "GuardServerMiddleware",
     "PolicyDenied",
     "PolicySnapshot",
+    "RowFilter",
     "PolicyUnavailable",
+    "SnapshotFilter",
     "Principal",
     "Resource",
     "audit_call",
