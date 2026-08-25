@@ -24,7 +24,15 @@ jobs:
           set -euo pipefail
           tag="${GITHUB_REF_NAME#v}"
           pyproject="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
-          dunder="$(grep -m1 '^__version__ = ' src/mcp_policy_guard/__init__.py | cut -d'"' -f2)"
+          # `_version.py`, not `__init__.py`: the dunder moved there in 0.6.1 so `policy` and
+          # `snapshot` could import the User-Agent without a circular import. Note the grep
+          # must keep matching SOMETHING — an empty `dunder` would compare equal to nothing and
+          # this guard would pass vacuously on a mismatch it exists to catch.
+          dunder="$(grep -m1 '^__version__ = ' src/mcp_policy_guard/_version.py | cut -d'"' -f2)"
+          if [ -z "$dunder" ]; then
+            echo "::error::Could not read __version__ from src/mcp_policy_guard/_version.py."
+            exit 1
+          fi
           echo "tag=$tag pyproject=$pyproject __version__=$dunder"
           if [ "$tag" != "$pyproject" ] || [ "$tag" != "$dunder" ]; then
             echo "::error::Tag $GITHUB_REF_NAME disagrees with pyproject ($pyproject) and/or __version__ ($dunder)."
