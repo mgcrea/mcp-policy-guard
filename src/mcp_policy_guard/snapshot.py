@@ -18,6 +18,7 @@ from typing import Any
 import httpx
 import structlog
 
+from ._version import USER_AGENT
 from .config import GuardConfig
 from .errors import PolicyUnavailable
 from .matching import glob_matches
@@ -216,7 +217,7 @@ class SnapshotCache:
         if function_name:
             params["function"] = function_name
 
-        headers = {"Authorization": f"Bearer {principal.token}"}
+        headers = {"Authorization": f"Bearer {principal.token}", "User-Agent": USER_AGENT}
         if entry is not None and entry.etag:
             headers["If-None-Match"] = entry.etag
 

@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence
 import httpx
 import structlog
 
+from ._version import USER_AGENT
 from .config import GuardConfig
 from .errors import PolicyDenied, PolicyUnavailable
 from .principal import Principal, current_correlation_id, current_principal, require_principal
@@ -293,7 +294,7 @@ class Guard:
         response = self._client.post(
             f"{self.config.policy_url}/evaluate",
             json=payload,
-            headers={"Authorization": f"Bearer {caller.token}"},
+            headers={"Authorization": f"Bearer {caller.token}", "User-Agent": USER_AGENT},
             timeout=self.config.timeout_seconds,
         )
 

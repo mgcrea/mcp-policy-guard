@@ -26,6 +26,7 @@ and in a tool handler:
         ...
 """
 
+from ._version import USER_AGENT, __version__
 from .audit import audit_call, emit, redact
 from .config import GuardConfig
 from .discovery import DISCOVERY_METHODS
@@ -57,10 +58,10 @@ from .request import (
 from .routing import routes
 from .snapshot import PolicySnapshot, SnapshotFilter
 
-__version__ = "0.6.0"
-
 __all__ = [
     "DISCOVERY_METHODS",
+    "USER_AGENT",
+    "__version__",
     "SCOPE_CALLER_ID",
     "SCOPE_CORRELATION_ID",
     "SCOPE_PRINCIPAL",

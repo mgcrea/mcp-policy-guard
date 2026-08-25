@@ -515,6 +515,24 @@ The identity fields are written last and cannot be overridden by keyword argumen
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
 
+## Upgrading to 0.6.1
+
+**The guard now identifies itself to the PDP, and row filters do not work without it.**
+
+Every call to `/evaluate` and `/snapshot` carries
+`User-Agent: mcp-policy-guard/<version> (python/<major>.<minor>)`. The platform parses that to
+learn which release answered, and uses it to decide whether this guard may be handed a row
+predicate at all — a guard that reports no version is read as too old to apply one, so the
+resources a predicate would have narrowed are **denied** rather than served unscoped.
+
+Through 0.6.0 no `User-Agent` was sent, so that check could never pass. The effect was that
+every row-filtered resource denied, for every tool, permanently — and because it failed in the
+safe direction, with a reason naming a version, it looked like a stale deployment rather than a
+missing header. Upgrade to 0.6.1 and the tool starts reporting on its next PDP call.
+
+Nothing else changes: no API change, and the header rides on each request rather than only on
+the client this package constructs, so a caller-injected `httpx.Client` reports too.
+
 ## Upgrading to 0.6
 
 **A decision can now carry row predicates, and ignoring them over-returns silently.** See
