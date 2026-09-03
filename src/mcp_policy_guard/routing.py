@@ -22,6 +22,7 @@ server on localhost. Hence `app_kwargs`.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Mapping, Sequence
 
 import structlog
@@ -49,6 +50,26 @@ def _sdk_major() -> int | None:
         return int(version("mcp").split(".", 1)[0])
     except Exception:
         return None
+
+
+#: The SDK's own default SSE stream path, on both generations.
+DEFAULT_SSE_PATH = "/sse"
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """Whether `fn` will accept `name` as a keyword argument.
+
+    The two SDK generations disagree about how the SSE stream path is set, and guessing
+    wrong raises `TypeError` at import time in every server that uses this package.
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):  # pragma: no cover - builtins and C callables
+        return False
+    params = signature.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return name in params
 
 
 def routes(
@@ -107,9 +128,57 @@ def routes(
     built: list[Any] = list(extra_routes)
 
     if config.sse_allowed:
-        # Its own path, and ahead of the catch-all: mounted after it, it would never match.
-        built.append(Mount(sse_path, app=mcp.sse_app(**sse_app_kwargs)))
-        logger.info("sse_mounted", path=sse_path, reason="MCP_REQUIRE_AUTH is not set")
+        # Splice the SSE app's own routes in rather than mounting it under `sse_path`.
+        #
+        # `sse_app()` is a Starlette app that already serves its stream at `/sse` and its
+        # message endpoint at `/messages/`, on both SDK generations. Mounting it at "/sse"
+        # therefore nested the two into `/sse/sse` and `/sse/messages/`, so the path this
+        # function logs — and that every server's `/` endpoint advertises — answered 404.
+        #
+        # Re-prefixing is not an option either: the transport bakes the message path into
+        # the `endpoint` event it sends the client at connect time, so a mount prefix makes
+        # the server advertise a URL it does not serve. Lifting the routes out keeps the
+        # absolute paths the SDK intends, while still placing them ahead of the catch-all
+        # mount below — which is the half the old hand-built route lists got wrong, leaving
+        # SSE reachable at no path at all.
+        sse_kwargs = dict(sse_app_kwargs)
+        if "sse_path" not in sse_kwargs:
+            # 2.x takes the stream path as a builder argument; 1.x reads it from the
+            # settings the server was constructed with and offers no way to override it
+            # here. Forward it where it is accepted so `sse_path` keeps meaning what it
+            # says, and say so plainly where it cannot be honoured rather than logging a
+            # path the server does not serve.
+            if sse_path == DEFAULT_SSE_PATH:
+                # Nothing to say: this is the SDK's own default. Passing it anyway would
+                # override a path a 1.x server was deliberately constructed with, which is
+                # the "invent no defaults" rule the transport kwargs already follow.
+                pass
+            elif _accepts_kwarg(mcp.sse_app, "sse_path"):
+                sse_kwargs["sse_path"] = sse_path
+            else:
+                logger.warning(
+                    "sse_path_not_applied",
+                    requested=sse_path,
+                    detail=(
+                        "this MCP SDK takes the SSE path from the server's own settings, "
+                        "so the requested path was ignored"
+                    ),
+                )
+
+        sse_app = mcp.sse_app(**sse_kwargs)
+        if getattr(sse_app, "user_middleware", None):
+            # Only reachable if the SDK's own auth is configured, which `sse_allowed`
+            # already precludes. Say so rather than drop it silently.
+            logger.warning(
+                "sse_middleware_not_preserved",
+                detail="the SDK's SSE app carries middleware that splicing its routes does not apply",
+            )
+        built.extend(sse_app.routes)
+        logger.info(
+            "sse_mounted",
+            paths=[getattr(route, "path", None) for route in sse_app.routes],
+            reason="MCP_REQUIRE_AUTH is not set",
+        )
 
     built.append(Mount("/", app=GuardMiddleware(mcp.streamable_http_app(**app_kwargs), config)))
     return built

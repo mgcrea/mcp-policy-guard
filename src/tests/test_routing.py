@@ -49,7 +49,17 @@ class FakeServer:
 
     def sse_app(self, **kwargs: Any):
         self.sse_app_kwargs = kwargs
-        return self._app
+        # A Starlette app carrying the SDK's own two routes, not a bare callable.
+        #
+        # The fake used to return `self._app`, which made every mounting strategy look
+        # identical and hid a real bug for two releases: mounting this app under "/sse"
+        # nests its internal "/sse" into "/sse/sse". A fake that cannot express the
+        # difference cannot test it.
+        from starlette.applications import Starlette
+
+        sse_path = kwargs.get("sse_path", "/sse")
+        message_path = kwargs.get("message_path", "/messages/")
+        return Starlette(routes=[Route(sse_path, self._app), Mount(message_path, app=self._app)])
 
 
 @pytest.fixture
@@ -62,10 +72,24 @@ class TestOrdering:
     def test_sse_is_mounted_before_the_catch_all(self, permissive):
         built = routes(FakeServer(), permissive)
 
+        paths = [getattr(r, "path", None) for r in built]
         # Reversed, `Mount("/")` would match /sse first and SSE would be dead code.
-        assert [type(r) for r in built] == [Mount, Mount]
-        assert built[0].path == "/sse"
-        assert built[1].path == ""  # Starlette normalises the catch-all "/" to ""
+        assert paths == ["/sse", "/messages", ""]  # Starlette normalises "/" to ""
+        assert isinstance(built[-1], Mount)
+
+    def test_the_sse_stream_is_served_at_the_advertised_path(self, permissive):
+        """Regression: the stream must answer on `/sse`, not `/sse/sse`.
+
+        `sse_app()` already serves its own `/sse` and `/messages/`, so mounting it under
+        `/sse` nested both. Servers kept advertising `/sse` from their `/` endpoint while
+        it 404'd, and the message path the transport hands the client at connect time
+        pointed somewhere the server did not serve.
+        """
+        built = routes(FakeServer(), permissive)
+        paths = [getattr(r, "path", None) for r in built]
+
+        assert "/sse/sse" not in paths
+        assert "/sse" in paths
 
     def test_extra_routes_come_first_and_stay_unguarded(self, permissive):
         async def healthz(request):  # pragma: no cover - never dispatched
@@ -80,7 +104,9 @@ class TestOrdering:
     def test_sse_path_is_configurable(self, permissive):
         built = routes(FakeServer(), permissive, sse_path="/events")
 
-        assert built[0].path == "/events"
+        # Forwarded to the builder, so the route itself moves — not just the log line.
+        assert getattr(built[0], "path", None) == "/events"
+        assert "/sse" not in [getattr(r, "path", None) for r in built]
 
     def test_sse_is_absent_when_auth_is_required(self, config):
         built = routes(FakeServer(), config)

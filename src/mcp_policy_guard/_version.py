@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 #: e.g. `mcp-policy-guard/0.6.1 (python/3.13)`
 USER_AGENT = f"mcp-policy-guard/{__version__} (python/{sys.version_info.major}.{sys.version_info.minor})"

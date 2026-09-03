@@ -515,6 +515,27 @@ The identity fields are written last and cannot be overridden by keyword argumen
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
 
+## Upgrading to 0.7.0
+
+**The SSE transport moves from `/sse/sse` to `/sse`, which is where it was always advertised.**
+
+`routes()` mounted the SDK's SSE app under `sse_path`, but that app already serves its own
+`/sse` and `/messages/`. The two nested, so the stream really answered on `/sse/sse` while every
+server's `/` endpoint — and this package's own `sse_mounted` log line — said `/sse`. Worse, the
+transport bakes the message path into the `endpoint` event it hands the client at connect time,
+so a client that did find the stream was then pointed at a URL the server did not serve.
+
+The SSE app's routes are now lifted into the route list rather than mounted under a prefix,
+which keeps the absolute paths the SDK intends while still placing them ahead of the catch-all
+mount. `sse_path` still moves the stream where the SDK accepts it as a builder argument (2.x);
+on 1.x, where the path comes from the server's own settings, a non-default request is logged as
+`sse_path_not_applied` rather than silently ignored.
+
+**This is a path change, so it is a minor bump rather than a patch.** Anything pointing at
+`/sse/sse` to work around the old behaviour must move to `/sse`. Nothing that used the
+documented path is affected, and streamable-HTTP at `/mcp` — what agent runtimes actually
+connect to — never was. SSE is only mounted when `MCP_REQUIRE_AUTH` is off.
+
 ## Upgrading to 0.6.1
 
 **The guard now identifies itself to the PDP, and row filters do not work without it.**
