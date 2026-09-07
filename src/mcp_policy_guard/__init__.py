@@ -35,6 +35,7 @@ from .errors import (
     GuardConfigurationError,
     GuardError,
     PolicyDenied,
+    PolicyNotEvaluated,
     PolicyUnavailable,
 )
 from .middleware import GuardMiddleware
@@ -75,6 +76,7 @@ __all__ = [
     "GuardMiddleware",
     "GuardServerMiddleware",
     "PolicyDenied",
+    "PolicyNotEvaluated",
     "PolicySnapshot",
     "RowFilter",
     "PolicyUnavailable",

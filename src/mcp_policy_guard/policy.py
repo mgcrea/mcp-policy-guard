@@ -10,7 +10,7 @@ import structlog
 
 from ._version import USER_AGENT
 from .config import GuardConfig
-from .errors import PolicyDenied, PolicyUnavailable
+from .errors import AuthenticationRequired, PolicyDenied, PolicyUnavailable
 from .principal import Principal, current_correlation_id, current_principal, require_principal
 from .request import current_message_request, principal_from_scope
 from .snapshot import UNCONFIGURED, PolicySnapshot, SnapshotCache, raise_if_refused
@@ -280,6 +280,73 @@ class Guard:
                 f"of {MAX_RESOURCES_PER_CALL}. Refusing rather than deciding on part of it."
             )
         return deduped
+
+    def report_not_evaluated(
+        self,
+        function_name: str | None,
+        reason: str,
+        resources: Sequence[Resource] = (),
+        *,
+        principal: Principal | None = None,
+    ) -> None:
+        """Tell the PDP a call failed before it could be decided. Best effort, never raises.
+
+        Establishing what a call touches can fail on its own — a database that will not
+        answer, a schema read that times out. The call is refused either way, but nothing
+        reached the platform: no `/evaluate`, so no audit row, so the tool looked like it had
+        simply gone quiet while the user got an error indistinguishable from a denial.
+
+        Four things here are deliberate:
+
+        **One attempt, no retry.** The caller already has an error in hand; retrying delays
+        it further to improve a record.
+
+        **`raise_if_refused` is not used.** It maps a 4xx to `PolicyUnavailable`, which is a
+        `PolicyDenied` — so against a platform too old to serve this route, a 404 would turn
+        a reportable failure into a denial, under `fail_mode: closed`, for a call that had
+        already failed for an unrelated reason.
+
+        **The same `User-Agent` as every other call.** The platform reads the guard version
+        out of it, and a tool whose *first* contact is a report would otherwise keep a null
+        version — which `guardSupportsRowFilters` reads as "cannot apply predicates", so its
+        row-scoped resources get denied rather than narrowed.
+
+        **Nothing it does can raise.** This runs on a path that is already failing; an
+        exception here would replace the real cause with a reporting bug.
+        """
+        if not self.config.policy_url or not self.config.tool_id:
+            return
+
+        try:
+            caller = _resolve_principal(principal)
+        except AuthenticationRequired:
+            # Nobody to report as. The platform authenticates this route with the caller's own
+            # forwarded token, so there is nothing to send and nothing it could attribute.
+            return
+
+        payload: dict[str, Any] = {
+            "tool": self.config.tool_id,
+            "function": function_name,
+            # Capped platform-side too, but truncating here keeps a driver's stack trace out
+            # of an audit column rather than relying on the far end to refuse it.
+            "reason": reason[:500],
+            "resources": [{"kind": r.kind, "value": r.value} for r in resources],
+        }
+        correlation_id = current_correlation_id()
+        if correlation_id:
+            payload["correlationId"] = correlation_id
+
+        try:
+            response = self._client.post(
+                f"{self.config.policy_url}/report",
+                json=payload,
+                headers={"Authorization": f"Bearer {caller.token}", "User-Agent": USER_AGENT},
+                timeout=self.config.timeout_seconds,
+            )
+            if response.status_code >= 400:
+                logger.warning("policy_report_rejected", status=response.status_code)
+        except Exception as exc:  # noqa: BLE001 - see the docstring; this must never raise
+            logger.warning("policy_report_failed", error=str(exc))
 
     def _evaluate_remote(self, caller: Principal, function_name: str | None, resources: Sequence[Resource]) -> Decision:
         payload: dict[str, Any] = {

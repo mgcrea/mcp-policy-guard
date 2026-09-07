@@ -76,3 +76,24 @@ class PolicyUnavailable(PolicyDenied):
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
+
+
+class PolicyNotEvaluated(GuardError):
+    """The call failed before policy could decide anything.
+
+    The guard must establish what a call touches before it can ask what the caller may
+    touch, and that step can fail on its own — a database that will not answer, a schema
+    read that times out. The call is refused either way, but it was **not denied**: policy
+    never ran.
+
+    **Deliberately not a `PolicyDenied` subclass**, unlike `PolicyUnavailable`. That one is
+    a subclass so a tool's fail-closed path cannot be forgotten; this one must escape those
+    handlers, because every `except PolicyDenied` in tool code words its message as an
+    access decision. Reporting a database outage as "you do not have access to dbo.orders"
+    is the exact confusion this class exists to end: before it, the two were byte-identical
+    to the user and invisible to the operator.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
