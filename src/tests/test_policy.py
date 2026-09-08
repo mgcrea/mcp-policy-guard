@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from mcp_policy_guard.errors import PolicyDenied, PolicyUnavailable
-from mcp_policy_guard.policy import Guard, Resource
+from mcp_policy_guard.policy import Guard, Resource, RowFilter, scope_notice
 from mcp_policy_guard.principal import Principal, set_principal
 
 from .conftest import snapshot_body
@@ -360,3 +360,51 @@ class TestRowFilters:
         decision = g.evaluate("mssql_query", [PAYROLL])
         assert not decision.allowed
         assert decision.filters == ()
+
+
+# ---------------------------------------------------------------------------
+# scope_notice
+# ---------------------------------------------------------------------------
+
+
+def test_scope_notice_is_empty_when_nothing_narrows():
+    """No filters means no notice — an unscoped result must not claim to be scoped."""
+    assert scope_notice(()) == ""
+
+
+def test_scope_notice_names_the_predicate_applied_to_this_caller():
+    notice = scope_notice(
+        (
+            RowFilter(
+                resource=Resource("sql_table", "dbo.tbdat_timesheet"),
+                column="Employee_DistrictID",
+                operator="in_",
+                values=("155",),
+            ),
+        )
+    )
+    assert "dbo.tbdat_timesheet.Employee_DistrictID in (155)" in notice
+    # The point of the notice: an empty result must not read as missing data.
+    assert "your access rather than missing data" in notice
+
+
+def test_scope_notice_joins_several_predicates():
+    notice = scope_notice(
+        (
+            RowFilter(
+                resource=Resource("sql_table", "dbo.tbdat_employees"),
+                column="DistrictID",
+                operator="in_",
+                values=("155", "506"),
+            ),
+            RowFilter(
+                resource=Resource("sql_table", "dbo.tbdat_timesheet"),
+                column="Employee_DistrictID",
+                operator="in_",
+                values=("155",),
+            ),
+        )
+    )
+    assert "dbo.tbdat_employees.DistrictID in (155, 506)" in notice
+    assert "dbo.tbdat_timesheet.Employee_DistrictID in (155)" in notice
+    assert notice.count(";") == 1

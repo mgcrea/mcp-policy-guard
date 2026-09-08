@@ -136,6 +136,34 @@ class RowFilter:
     values: tuple[str, ...]
 
 
+def scope_notice(filters: "Iterable[RowFilter]") -> str:
+    """One line telling the caller their results were narrowed, or "" if nothing narrowed them.
+
+    Row scoping is otherwise **invisible**: the predicate is applied by rewriting the query, so
+    a caller asking about something they hold no entitlement for gets a valid query, zero rows,
+    and no reason. Observed in the field — an assistant handed an empty result concluded the
+    database replica was incomplete and told the user so, which is both false and the opposite
+    of an auditable limit. A denial explains itself; a filter has to be made to.
+
+    This is deliberately NOT an enumeration oracle, unlike a "3 tables hidden" listing would be.
+    It reports only the predicate already being applied to *this* caller — their own column and
+    their own resolved values, which the PDP derived from their own attributes. It reveals
+    nothing about other callers, other districts, or the rows withheld.
+    """
+    predicates = [
+        f"{f.resource.value}.{f.column} {'in' if f.operator == 'in_' else f.operator} ({', '.join(f.values)})"
+        for f in filters
+    ]
+    if not predicates:
+        return ""
+    return (
+        "[Scoped by access policy: results are limited to "
+        + "; ".join(predicates)
+        + ". Rows outside that are not returned, so an empty or short result here reflects "
+        "your access rather than missing data.]"
+    )
+
+
 @dataclass(frozen=True)
 class Decision:
     decision: str

@@ -39,7 +39,7 @@ from .errors import (
     PolicyUnavailable,
 )
 from .middleware import GuardMiddleware
-from .policy import UNDETERMINED, Decision, Guard, Resource, RowFilter
+from .policy import UNDETERMINED, Decision, Guard, Resource, RowFilter, scope_notice
 from .principal import (
     Principal,
     current_caller_id,
@@ -92,6 +92,7 @@ __all__ = [
     "guarded",
     "is_guarded",
     "redact",
+    "scope_notice",
     "require_principal",
     "routes",
 ]
