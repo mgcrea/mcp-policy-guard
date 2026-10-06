@@ -50,6 +50,7 @@ class TestIdentity:
         assert record["email"] == "user-a@example.com"
         assert record["groups"] == ["/ops-sales"]
         assert record["client_id"] == "open-webui"
+        assert record["principal_kind"] == "keycloak"
 
     def test_records_the_correlation_id_that_joins_systems(self, captured):
         # The same id travels with every hop of one turn, so a question asked of this log
@@ -73,6 +74,7 @@ class TestIdentity:
         # not.
         assert captured[0]["subject"] is None
         assert captured[0]["groups"] == []
+        assert captured[0]["principal_kind"] is None
 
 
 class TestDecisionRecording:

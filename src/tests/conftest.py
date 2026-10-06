@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from mcp_policy_guard.config import GuardConfig
-from mcp_policy_guard.jwt_verify import reset_jwk_clients
+from mcp_policy_guard.jwt_verify import reset_jwk_clients, reset_replay_cache
 
 ISSUER = "https://idp.test/realms/demo"
 JWKS_URI = f"{ISSUER}/protocol/openid-connect/certs"
@@ -67,6 +67,7 @@ def _serve_jwks(monkeypatch, jwks_body):
     path rather than only the fallback.
     """
     reset_jwk_clients()
+    reset_replay_cache()
     monkeypatch.setattr(
         "jwt.PyJWKClient.fetch_data",
         lambda self: json.loads(jwks_body),
@@ -77,6 +78,7 @@ def _serve_jwks(monkeypatch, jwks_body):
     )
     yield
     reset_jwk_clients()
+    reset_replay_cache()
 
 
 @pytest.fixture
