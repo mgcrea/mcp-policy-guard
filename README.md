@@ -322,7 +322,8 @@ one on either side silently disables the corresponding control.
 | `MCP_DISCOVERY_REQUIRES_AUTH` | Require a bearer for `initialize`/`tools/list` too. Default false. |
 | `MCP_AUTH_ISSUER` | OIDC issuer URL. The JWKS endpoint is resolved from it by discovery. |
 | `MCP_AUTH_AUDIENCE` | Optional `aud` check. Leave unset where one issuer mints tokens for several clients. |
-| `MCP_TOOL_ID` | This server's tool id; how the PDP resolves which policy applies. |
+| `MCP_TOOL_ID` | This server's tool id; how the PDP resolves which policy applies. Also the required `aud` of a platform credential. |
+| `MCP_PLATFORM_CREDENTIAL_ISSUER` | Issuer of the platform's per-request tool credential. Unset (default) refuses every such credential. See [Platform tool credential](#platform-tool-credential). |
 | `MCP_POLICY_URL` | Base URL of the decision point, e.g. `http://backend:3000/api/policy`. |
 | `MCP_POLICY_FAIL_MODE` | `closed` (default) or `open`. |
 | `MCP_POLICY_STALE_MAX_SECONDS` | How long a cached snapshot may keep answering during an outage. Default 300. |
@@ -341,6 +342,10 @@ do nothing:
 - `MCP_POLICY_URL` without `MCP_REQUIRE_AUTH` — policy is evaluated per caller, so with no
   verified caller there is nothing to decide against. Every check would raise, leaving the
   tool either wholly broken or, if a handler catches broadly, wholly open.
+
+`MCP_PLATFORM_CREDENTIAL_ISSUER` equal to `MCP_AUTH_ISSUER` is refused too: the path is
+chosen by `iss`, so every ordinary access token would be held to the credential's rules and
+refused.
 
 `MCP_POLICY_STALE_MAX_SECONDS` below `MCP_POLICY_TTL_SECONDS` is also refused: entries would
 expire before they were ever revalidated, and the guard would fail closed on every call after
@@ -381,6 +386,46 @@ Claims are read in Keycloak's shape — `realm_access.roles` for roles, `groups`
 the client id — and a `typ` payload claim of anything other than `Bearer` is rejected, which
 is what keeps an ID token out. Absent `typ` is accepted, since it is a Keycloak convention
 rather than an RFC 9068 guarantee.
+
+### Platform tool credential
+
+Some callers hold no session at the identity provider and so have no access token to
+forward — in practice, chat users whose client has no live OAuth session for them. For those,
+a trusted platform can vouch for the user instead, by minting a credential **per request, for
+one tool, valid for minutes**: never one fixed secret with a user name sent beside it.
+
+Set `MCP_PLATFORM_CREDENTIAL_ISSUER` and a bearer whose unverified `iss` equals it is verified
+on a separate, stricter path. The unverified read only *chooses* the path; nothing is trusted
+on the strength of it, because each path then verifies the signature against its own
+issuer's keys and pins `iss` again.
+
+| Check | Rule |
+| --- | --- |
+| Key set | Discovered from `{issuer}/.well-known/openid-configuration`, same as above. The tool holds no secret, only the platform's public key. |
+| Algorithm | `ES256` only. A key of another type published by the same issuer does not widen it. |
+| `aud` | **Required**, and exactly `MCP_TOOL_ID` as a single string — a list containing it is refused. With no `MCP_TOOL_ID`, every credential is refused. `MCP_AUTH_AUDIENCE` plays no part. |
+| `exp`, `iat`, `jti`, `sub` | Required. `exp - iat` above 300 s is refused, however good the signature. |
+| `typ` | As for access tokens: anything other than `Bearer` is refused. |
+| Replay | Each `jti` is accepted **once** per process, remembered until shortly after its `exp`. A second use is refused. |
+
+Every refusal carries the same `Invalid or expired token` message as any other, a replay
+included.
+
+What the credential does **not** give you:
+
+- **IdP groups.** It names a user, not their groups, so the principal's `groups` and `roles`
+  are empty and a policy keyed on identity-provider groups will not match these callers. The
+  PDP re-verifies the credential and resolves the user's groups and attributes from `sub`.
+- **Cross-process replay protection.** The `jti` cache lives in one process. A copy replayed
+  at another replica, or another worker of the same server, inside the credential's lifetime
+  is accepted once there. It is still bound to this tool and to that window.
+
+The principal is marked `kind="platform_credential"` (an access token is `"keycloak"`), and
+audit records carry it as `principal_kind`. That is for logs only; the PDP decides from the
+token it re-verifies, not from this marker.
+
+With `MCP_PLATFORM_CREDENTIAL_ISSUER` unset the access-token path is exactly what it was —
+the token is not even read before verification.
 
 ## Policy decision point contract
 
@@ -501,8 +546,9 @@ One JSON record per call on stdout, for whatever log pipeline is already collect
 deliberately not a write to an audit database, since the server holds no such credential and
 granting one would be a larger grant than the thing being audited.
 
-Each record carries `subject`, `email`, `groups`, `client_id`, `correlation_id`, `caller_id`,
-the `decision`, the `reason`, the `resources` and the redacted `params`. Secret-looking
+Each record carries `subject`, `email`, `groups`, `client_id`, `principal_kind`,
+`correlation_id`, `caller_id`, the `decision`, the `reason`, the `resources` and the redacted
+`params`. Secret-looking
 parameter keys (`password`, `apiKey`, `connectionString`, …) are masked by whole-word
 matching, which is what keeps `secretary` and `monkey` readable, and redaction **recurses**
 into nested dicts and lists — `{"config": {"password": "…"}}` is where the credential
@@ -514,6 +560,21 @@ The identity fields are written last and cannot be overridden by keyword argumen
 `caller_id` is recorded from the caller's own header and is **never used in a policy
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
+
+## Upgrading to 0.10.0
+
+**Opt-in: a second kind of bearer, the platform's per-request tool credential.** Nothing
+changes until `MCP_PLATFORM_CREDENTIAL_ISSUER` is set; see
+[Platform tool credential](#platform-tool-credential). Set it alongside `MCP_TOOL_ID`, which
+every credential's `aud` must equal — without one, every credential is refused and a
+`platform_credential_without_tool_id` warning is logged at startup.
+
+Two additive changes apply regardless: `Principal` gains a `kind` field (`"keycloak"` by
+default, so code constructing one by hand is unaffected), and every audit record gains
+`principal_kind`. A log query selecting fields by name is unaffected; one asserting the exact
+set of keys needs the new one.
+
+Startup now refuses `MCP_PLATFORM_CREDENTIAL_ISSUER` equal to `MCP_AUTH_ISSUER`.
 
 ## Upgrading to 0.7.0
 
