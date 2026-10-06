@@ -112,6 +112,13 @@ class GuardConfig:
     #: tool *names* are themselves sensitive, accepting that clients must then be able to
     #: authenticate at startup.
     discovery_requires_auth: bool = False
+    #: Issuer of the platform's short-lived, per-request tool credential, or None to refuse
+    #: every such credential. A token whose `iss` equals this is verified on its own, much
+    #: stricter path (see `jwt_verify._verify_platform_credential`): ES256 only, `aud` must
+    #: be exactly `tool_id`, a `jti` that is accepted once. It exists for callers with no
+    #: session at the identity provider, so it is **additive** — `issuer` keeps verifying
+    #: Keycloak tokens exactly as before, and leaving this unset changes nothing.
+    platform_credential_issuer: str | None = None
 
     @property
     def policy_enabled(self) -> bool:
@@ -180,6 +187,31 @@ class GuardConfig:
                 "MCP_REQUIRE_AUTH=true, or unset MCP_POLICY_URL to run without policy."
             )
 
+        platform_credential_issuer = _env_str("MCP_PLATFORM_CREDENTIAL_ISSUER")
+        if platform_credential_issuer and platform_credential_issuer == issuer:
+            # The path is chosen by `iss`, so one issuer for both would route every ordinary
+            # access token down the credential path — where it has no `jti`, the wrong `aud`
+            # and possibly the wrong algorithm — and refuse every caller the guard served
+            # yesterday. Nothing about that is recoverable at runtime, so say it at startup.
+            raise GuardConfigurationError(
+                "MCP_PLATFORM_CREDENTIAL_ISSUER equals MCP_AUTH_ISSUER. The platform credential "
+                "must come from its own issuer; with one issuer for both, every access token "
+                "would be held to the credential's rules and refused."
+            )
+        tool_id = _env_str("MCP_TOOL_ID")
+        if platform_credential_issuer and not tool_id:
+            # Fails closed, so not worth refusing to start over: every credential is refused
+            # because there is nothing to bind its `aud` to, while Keycloak callers are served
+            # as before. But it looks exactly like a broken broker from the outside.
+            logger.warning(
+                "platform_credential_without_tool_id",
+                detail=(
+                    "MCP_PLATFORM_CREDENTIAL_ISSUER is set but MCP_TOOL_ID is not. A platform "
+                    "credential is bound to one tool by its `aud`, so with no tool id every "
+                    "credential is refused. Set MCP_TOOL_ID to accept them."
+                ),
+            )
+
         stale_max_seconds = _env_float("MCP_POLICY_STALE_MAX_SECONDS", DEFAULT_STALE_MAX_SECONDS)
         snapshot_ttl_seconds = _env_float("MCP_POLICY_TTL_SECONDS", DEFAULT_SNAPSHOT_TTL_SECONDS)
         if stale_max_seconds < snapshot_ttl_seconds:
@@ -196,7 +228,7 @@ class GuardConfig:
             require_auth=require_auth,
             issuer=issuer,
             audience=_env_str("MCP_AUTH_AUDIENCE"),
-            tool_id=_env_str("MCP_TOOL_ID"),
+            tool_id=tool_id,
             policy_url=policy_url,
             fail_mode=raw_fail_mode,  # type: ignore[arg-type]
             stale_max_seconds=stale_max_seconds,
@@ -209,4 +241,5 @@ class GuardConfig:
             ),
             policy_retries=int(_env_float("MCP_POLICY_RETRIES", DEFAULT_POLICY_RETRIES)),
             discovery_requires_auth=_env_bool("MCP_DISCOVERY_REQUIRES_AUTH"),
+            platform_credential_issuer=platform_credential_issuer,
         )

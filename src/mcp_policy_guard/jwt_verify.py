@@ -3,11 +3,19 @@
 The signing key set is located by OIDC Discovery, so any standards-compliant issuer works.
 The `typ` check below is Keycloak-specific; its reasoning is not self-evident and is
 reproduced in full so this file can be reviewed on its own.
+
+Two kinds of bearer are accepted, told apart by their unverified `iss` and then verified on
+entirely separate paths: an access token from `MCP_AUTH_ISSUER`, and — only when
+`MCP_PLATFORM_CREDENTIAL_ISSUER` is set — the platform's per-request tool credential. The
+second exists for callers who hold no session at the identity provider and so have no access
+token to forward; the platform vouches for them instead, one request and one tool at a time.
 """
 
 from __future__ import annotations
 
+import heapq
 import threading
+import time
 from typing import Any
 
 import httpx
@@ -30,6 +38,23 @@ _FALLBACK_JWKS_PATH = "/protocol/openid-connect/certs"
 
 _clients: dict[str, PyJWKClient] = {}
 _clients_lock = threading.Lock()
+
+# The one message every refusal carries. See `verify_token` for why it never varies.
+_REFUSED = "Invalid or expired token"
+
+# The platform mints credentials that live 120 s. Anything claiming longer than this was not
+# minted by the code this guard was written against, and a long-lived credential is exactly
+# the "one fixed secret" shape the per-request design exists to replace — so it is refused
+# even when its signature is good. Generous enough to absorb a deliberate bump on the
+# platform side without a lockstep guard release.
+PLATFORM_CREDENTIAL_MAX_LIFETIME_SECONDS = 300
+
+# How long past `exp` a spent `jti` is remembered. PyJWT and the replay cache each read the
+# clock separately, so a replay arriving in the instant between PyJWT's "not yet expired"
+# and the cache's purge would find the original entry gone and be accepted. A token past
+# `exp` is refused by signature verification anyway, so remembering a little longer costs a
+# few entries and closes the gap.
+_REPLAY_GRACE_SECONDS = 5.0
 
 
 def _fetch_discovery_document(issuer: str, timeout: float) -> dict[str, Any] | None:
@@ -128,13 +153,165 @@ def _assert_bearer_token(claims: dict[str, Any]) -> None:
         raise AuthenticationRequired("Invalid or expired token")
 
 
+class _ReplayCache:
+    """Credential ids (`jti`) already accepted by this process, each kept until it expires.
+
+    A platform credential is a bearer: anything that sees it in flight — a proxy log, a
+    debugging dump, a compromised hop — could otherwise present it again for the rest of its
+    lifetime. Accepting each `jti` once is what makes "signed per request" true at the
+    receiving end rather than only at the minting end.
+
+    **Per process, by design and with a known limit.** A replica — or a second uvicorn worker
+    — keeps its own set, so a stolen credential replayed at a *different* process inside its
+    120 s is accepted once there. It is still bound to this one tool by `aud` and to that
+    window by `exp`; closing it fully needs shared state this library does not want to own.
+
+    **Unbounded on purpose.** An entry is only ever added for a credential whose signature
+    already verified, so the size is set by how fast the platform mints for this tool, times
+    the lifetime — not by anything a caller controls. Evicting a live entry to save memory
+    would silently reopen replay for it, which is the one thing this exists to prevent.
+
+    Thread-safe: verification runs on the thread pool (`anyio.to_thread`), and two copies of
+    one credential arriving together is precisely the race that must not admit both.
+    """
+
+    def __init__(self) -> None:
+        self._seen: set[str] = set()
+        # (forget_at, jti), so the soonest-to-expire is always at the front and a purge
+        # touches only what it removes.
+        self._expiries: list[tuple[float, str]] = []
+        self._lock = threading.Lock()
+
+    def claim(self, jti: str, exp: float, now: float | None = None) -> bool:
+        """Record `jti` as spent. False if it already was — a replay."""
+        current = time.time() if now is None else now
+        with self._lock:
+            while self._expiries and self._expiries[0][0] <= current:
+                _, expired = heapq.heappop(self._expiries)
+                self._seen.discard(expired)
+            if jti in self._seen:
+                return False
+            self._seen.add(jti)
+            heapq.heappush(self._expiries, (exp + _REPLAY_GRACE_SECONDS, jti))
+            return True
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._seen)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._seen.clear()
+            self._expiries.clear()
+
+
+_replay_cache = _ReplayCache()
+
+
+def reset_replay_cache() -> None:
+    """Test-only: forget every spent credential id."""
+    _replay_cache.clear()
+
+
+def _unverified_issuer(token: str) -> str | None:
+    """The token's `iss`, read **without** checking anything — used only to choose a path.
+
+    Safe because nothing is trusted on the strength of it: each path then verifies the
+    signature against *its own* issuer's keys and pins `iss` again. A token lying about its
+    issuer just walks down a path whose keys did not sign it. Anything unreadable returns
+    None and takes the access-token path, where it fails exactly as it always has.
+    """
+    try:
+        claims = jwt.decode(token, options={"verify_signature": False})
+    except jwt.exceptions.PyJWTError:
+        return None
+    issuer = claims.get("iss")
+    return issuer if isinstance(issuer, str) else None
+
+
+def _verify_platform_credential(token: str, config: GuardConfig, issuer: str) -> Principal:
+    """Verify a platform tool credential: short-lived, bound to this tool, usable once.
+
+    Stricter than the access-token path on every axis, because it is meant to be:
+
+    - **ES256 only.** The platform signs with one key of one type. An access token's broader
+      list exists to accommodate an issuer we do not control; this one we do, and every
+      extra algorithm is surface for an algorithm-confusion bug and nothing else.
+    - **`aud` is required and must be exactly `MCP_TOOL_ID`** (`strict_aud`: a string, not a
+      list containing it). That is what makes a credential for one tool worthless at
+      another. `MCP_AUTH_AUDIENCE` plays no part — it exists because Keycloak `aud` varies
+      by client, which is not true here. No tool id means nothing to bind to, so refuse.
+    - **`exp`, `iat`, `jti` required, and `exp - iat` at most 300 s.** A credential that
+      outlives minutes is the fixed secret this design replaces.
+    - **Each `jti` accepted once** per process; see `_ReplayCache`.
+
+    The principal carries no groups or roles: the credential has none to give, so a policy
+    keyed on IdP groups will not match these callers. The PDP resolves platform groups and
+    attributes from the `sub` itself when it re-verifies the credential.
+    """
+    if not config.tool_id:
+        logger.warning("platform_credential_without_tool_id")
+        raise AuthenticationRequired(_REFUSED)
+
+    try:
+        signing_key = _jwk_client(issuer, config.timeout_seconds).get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["ES256"],
+            issuer=issuer,
+            audience=config.tool_id,
+            options={"strict_aud": True, "require": ["exp", "iat", "jti", "aud", "iss", "sub"]},
+        )
+    except jwt.exceptions.PyJWTError as exc:
+        logger.warning("platform_credential_verification_failed", error=str(exc))
+        raise AuthenticationRequired(_REFUSED) from exc
+
+    # PyJWT has already refused a non-integer `exp`/`iat`, so these conversions cannot fail.
+    exp, iat = int(claims["exp"]), int(claims["iat"])
+    if exp - iat > PLATFORM_CREDENTIAL_MAX_LIFETIME_SECONDS:
+        logger.warning("platform_credential_lifetime_too_long", lifetime=exp - iat)
+        raise AuthenticationRequired(_REFUSED)
+
+    jti = claims["jti"]
+    if not isinstance(jti, str) or not jti:
+        logger.warning("platform_credential_invalid_jti")
+        raise AuthenticationRequired(_REFUSED)
+
+    _assert_bearer_token(claims)
+
+    try:
+        principal = Principal.from_claims(claims, token, kind="platform_credential")
+    except ValueError as exc:
+        logger.warning("token_missing_subject")
+        raise AuthenticationRequired(_REFUSED) from exc
+
+    # Last, so only a credential that is otherwise acceptable is ever recorded. That keeps
+    # the cache's size a function of what the platform mints for this tool, which is the
+    # bound `_ReplayCache` relies on in place of an eviction policy.
+    if not _replay_cache.claim(jti, exp):
+        logger.warning("platform_credential_replayed", jti=jti, subject=principal.subject)
+        raise AuthenticationRequired(_REFUSED)
+
+    logger.debug("platform_credential_accepted", jti=jti, subject=principal.subject, client_id=principal.client_id)
+    return principal
+
+
 def verify_token(token: str, config: GuardConfig) -> Principal:
     """Verify a bearer token and build the principal it names.
 
     Raises `AuthenticationRequired` on any failure. The message is deliberately identical
-    across causes — expired, wrong issuer, bad signature, wrong token type — because a
-    caller learning *why* their token was refused learns about the deployment.
+    across causes — expired, wrong issuer, bad signature, wrong token type, a replayed
+    credential — because a caller learning *why* their token was refused learns about the
+    deployment.
+
+    With `platform_credential_issuer` unset this is exactly the access-token check it has
+    always been; the token is not even peeked at.
     """
+    platform_issuer = config.platform_credential_issuer
+    if platform_issuer and _unverified_issuer(token) == platform_issuer:
+        return _verify_platform_credential(token, config, platform_issuer)
+
     if not config.issuer:
         raise AuthenticationRequired("Guard has no issuer configured")
 

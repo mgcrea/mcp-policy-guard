@@ -6,7 +6,7 @@ import contextvars
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 # Header carrying the id minted upstream and threaded through every hop of one turn, so an
 # audit row here, a trace in the agent runtime and a log line in the calling service can be
@@ -19,6 +19,14 @@ DEFAULT_CORRELATION_HEADER = "x-mcp-correlation-id"
 # read it would be taking the word of the party it is meant to constrain. Override with
 # `MCP_CALLER_ID_HEADER`.
 DEFAULT_CALLER_ID_HEADER = "x-mcp-caller-id"
+
+#: Which verification path produced a principal. `keycloak` is an access token from the
+#: configured `MCP_AUTH_ISSUER`; `platform_credential` is the platform's per-request,
+#: tool-bound credential from `MCP_PLATFORM_CREDENTIAL_ISSUER`. **For logs and audit only.**
+#: Both name the same user by the same `sub`, and the PDP re-verifies whichever token it is
+#: handed, so a policy that branched on this would be second-guessing a decision the PDP has
+#: already made with more information than the guard holds.
+PrincipalKind = Literal["keycloak", "platform_credential"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +44,7 @@ class Principal:
     groups: tuple[str, ...] = ()
     roles: tuple[str, ...] = ()
     client_id: str | None = None
+    kind: PrincipalKind = "keycloak"
 
     def fingerprint(self) -> str:
         """A stable cache key for this caller's effective identity.
@@ -59,7 +68,7 @@ class Principal:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @classmethod
-    def from_claims(cls, claims: dict[str, Any], token: str) -> Principal:
+    def from_claims(cls, claims: dict[str, Any], token: str, kind: PrincipalKind = "keycloak") -> Principal:
         subject = claims.get("sub")
         if not isinstance(subject, str) or not subject:
             raise ValueError("Token has no subject")
@@ -84,6 +93,7 @@ class Principal:
             groups=groups,
             roles=roles,
             client_id=azp if isinstance(azp, str) else None,
+            kind=kind,
         )
 
 

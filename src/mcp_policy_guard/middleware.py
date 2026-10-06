@@ -210,6 +210,7 @@ class GuardMiddleware:
             subject=principal.subject,
             client_id=principal.client_id,
             groups=list(principal.groups),
+            kind=principal.kind,
         )
         await self.app(scope, receive, send)
 

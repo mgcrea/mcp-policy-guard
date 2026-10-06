@@ -113,6 +113,7 @@ def _identity_fields() -> dict[str, Any]:
         "email": principal.email if principal else None,
         "groups": list(principal.groups) if principal else [],
         "client_id": principal.client_id if principal else None,
+        "principal_kind": principal.kind if principal else None,
         "correlation_id": current_correlation_id(),
         "caller_id": current_caller_id(),
     }
