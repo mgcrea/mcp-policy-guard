@@ -58,6 +58,7 @@ from .request import (
 )
 from .routing import routes
 from .snapshot import PolicySnapshot, SnapshotFilter
+from .via import ViaHop, parse_via
 
 __all__ = [
     "DISCOVERY_METHODS",
@@ -81,6 +82,7 @@ __all__ = [
     "RowFilter",
     "PolicyUnavailable",
     "SnapshotFilter",
+    "ViaHop",
     "Principal",
     "Resource",
     "audit_call",
@@ -91,6 +93,7 @@ __all__ = [
     "emit",
     "guarded",
     "is_guarded",
+    "parse_via",
     "redact",
     "scope_notice",
     "require_principal",

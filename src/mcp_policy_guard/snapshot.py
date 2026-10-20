@@ -23,6 +23,7 @@ from .config import GuardConfig
 from .errors import PolicyUnavailable
 from .matching import glob_matches
 from .principal import Principal
+from .via import ViaHop, via_for_operator
 
 logger = structlog.get_logger()
 
@@ -60,6 +61,8 @@ class SnapshotFilter:
     column: str
     operator: str
     values: tuple[str, ...]
+    #: Join path for `in_via`, empty for every other operator.
+    via: tuple[ViaHop, ...] = ()
 
     def covers(self, kind: str, value: str) -> bool:
         return self.kind == kind and glob_matches(self.pattern, value)
@@ -100,6 +103,7 @@ class PolicySnapshot:
                         column=str(raw["column"]),
                         operator=str(raw["operator"]),
                         values=tuple(str(value) for value in raw.get("values", [])),
+                        via=via_for_operator(str(raw["operator"]), raw),
                     )
                     for raw in entry.get("filters", []) or []
                 ),
@@ -239,8 +243,16 @@ class SnapshotCache:
         if response.status_code >= 400:
             raise httpx.HTTPError(f"Policy snapshot returned HTTP {response.status_code}")
 
+        try:
+            snapshot = PolicySnapshot.from_json(response.json())
+        except ValueError as exc:
+            # An `in_via` filter nobody can apply. A snapshot is served to every later call,
+            # so a bad row must refuse here rather than be cached as an allow.
+            logger.error("policy_snapshot_malformed", error=str(exc))
+            raise PolicyUnavailable(f"Policy snapshot is unusable: {exc}") from exc
+
         return _CacheEntry(
-            snapshot=PolicySnapshot.from_json(response.json()),
+            snapshot=snapshot,
             etag=response.headers.get("etag"),
             validated_at=time.monotonic(),
         )

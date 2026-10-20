@@ -294,3 +294,51 @@ class TestSnapshotFilters:
         snapshot = PolicySnapshot.from_json(snapshot_body())
         assert snapshot.filters_for("sql_table", "dbo.orders") == ()
         assert snapshot.decide_resource("sql_table", "dbo.orders") == ("allow", "rule-sales")
+
+
+class TestInVia:
+    ROW = {
+        "kind": "sql_table",
+        "pattern": "public.tj_operation_utilisateur",
+        "effect": "allow",
+        "ruleId": "r1",
+    }
+    HOPS = [
+        {"table": "public.t_operation", "key": "ope_id_operation", "column": "ope_id_agence"},
+        {"table": "public.t_agence", "key": "age_id_agence", "column": "age_code"},
+    ]
+
+    def body(self, **filter_overrides):
+        raw = {
+            "pattern": "public.tj_operation_utilisateur",
+            "column": "opu_id_operation",
+            "operator": "in_via",
+            "values": ["775"],
+            "via": self.HOPS,
+        }
+        raw.update(filter_overrides)
+        raw = {k: v for k, v in raw.items() if v is not None}
+        return snapshot_body(resourceRules=[{**self.ROW, "filters": [raw]}])
+
+    def test_snapshot_reads_in_via_path(self):
+        snapshot = PolicySnapshot.from_json(self.body())
+        (f,) = snapshot.filters_for("sql_table", "public.tj_operation_utilisateur")
+        assert [h.table for h in f.via] == ["public.t_operation", "public.t_agence"]
+        assert f.via[1].column == "age_code"
+
+    def test_snapshot_in_via_without_path_never_allows(self, config):
+        with pytest.raises(ValueError):
+            PolicySnapshot.from_json(self.body(via=None))
+        # Through the cache the refusal is a PolicyUnavailable, never a cached allow.
+        cached = cache(config, lambda _r: httpx.Response(200, json=self.body(via=None)))
+        with pytest.raises(PolicyUnavailable):
+            cached.get(USER_A, "postgres_query")
+
+    def test_snapshot_via_on_other_operator_is_refused(self):
+        with pytest.raises(ValueError):
+            PolicySnapshot.from_json(self.body(operator="in_"))
+
+    def test_snapshot_filter_without_via_has_empty_path(self):
+        snapshot = PolicySnapshot.from_json(self.body(operator="in_", via=None))
+        (f,) = snapshot.filters_for("sql_table", "public.tj_operation_utilisateur")
+        assert f.via == ()

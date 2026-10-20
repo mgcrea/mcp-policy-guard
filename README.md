@@ -561,6 +561,24 @@ The identity fields are written last and cannot be overridden by keyword argumen
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
 
+## Upgrading to 0.11.0
+
+**A new row-filter operator, `in_via`, and the join path it carries.** `RowFilter.via` (and
+`SnapshotFilter.via`) is a tuple of `ViaHop(table, key, column)`, 1 to 3 hops, empty for every
+other operator. It narrows a table by a column it does not hold: the tool follows the hops
+(`hop1.table.key` against the filtered `column`, `hop2.table.key` against `hop1.column`, and so
+on) and compares the **last** hop's `column` with `values`. Applying the path is the tool's
+job; this package only carries and validates it (`parse_via` is exported).
+
+Wire shape: `{"column", "operator": "in_via", "values", "via": [{"table", "key", "column"}, ...]}`.
+`via` is present only on `in_via`.
+
+Validation fails closed, on both the evaluate and the snapshot path. `in_via` without a valid
+path (missing, empty, more than 3 hops, a hop missing a non-empty string field), or any other
+operator carrying `via`, raises `PolicyUnavailable` rather than becoming an allow with a filter
+nobody can apply. A tool that does not understand `in_via` must refuse a call whose
+`decision.filters` contain one, exactly as for any predicate it cannot apply.
+
 ## Upgrading to 0.10.0
 
 **Opt-in: a second kind of bearer, the platform's per-request tool credential.** Nothing

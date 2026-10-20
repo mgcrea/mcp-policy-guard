@@ -7,6 +7,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
+from mcp_policy_guard import ViaHop
 from mcp_policy_guard.errors import PolicyDenied, PolicyUnavailable
 from mcp_policy_guard.policy import Guard, Resource, RowFilter, scope_notice
 from mcp_policy_guard.principal import Principal, set_principal
@@ -408,3 +409,155 @@ def test_scope_notice_joins_several_predicates():
     assert "dbo.tbdat_employees.DistrictID in (155, 506)" in notice
     assert "dbo.tbdat_timesheet.Employee_DistrictID in (155)" in notice
     assert notice.count(";") == 1
+
+
+# ---------------------------------------------------------------------------
+# in_via
+# ---------------------------------------------------------------------------
+
+HOP_OPERATION = {"table": "public.t_operation", "key": "ope_id_operation", "column": "ope_id_agence"}
+HOP_AGENCE = {"table": "public.t_agence", "key": "age_id_agence", "column": "age_code"}
+OPU = Resource("sql_table", "public.tj_operation_utilisateur")
+
+
+def via_body(raw_filter):
+    return evaluate_body(
+        resourceDecisions=[
+            {
+                "resource": {"kind": "sql_table", "value": "public.tj_operation_utilisateur"},
+                "effect": "allow",
+                "matchedRuleId": "r1",
+                "filters": [raw_filter],
+            }
+        ]
+    )
+
+
+def in_via_filter(**overrides):
+    raw = {
+        "column": "opu_id_operation",
+        "operator": "in_via",
+        "values": ["775"],
+        "via": [HOP_OPERATION, HOP_AGENCE],
+    }
+    raw.update(overrides)
+    return {k: v for k, v in raw.items() if v is not None}
+
+
+class TestInVia:
+    def evaluate(self, config, raw_filter):
+        g = guard(config, lambda request: httpx.Response(200, json=via_body(raw_filter)))
+        set_principal(USER_A)
+        return g.evaluate("postgres_query", [OPU])
+
+    def test_filters_from_reads_in_via_path(self, config):
+        decision = self.evaluate(config, in_via_filter())
+        assert decision.filters[0].via == (
+            ViaHop("public.t_operation", "ope_id_operation", "ope_id_agence"),
+            ViaHop("public.t_agence", "age_id_agence", "age_code"),
+        )
+        assert decision.filters[0].operator == "in_via"
+        assert decision.filters[0].values == ("775",)
+
+    def test_in_via_without_path_is_unusable(self, config):
+        with pytest.raises(PolicyUnavailable):
+            self.evaluate(config, in_via_filter(via=None))
+
+    @pytest.mark.parametrize(
+        "via",
+        [
+            [],
+            [HOP_OPERATION, HOP_AGENCE, HOP_OPERATION, HOP_AGENCE],
+            None,
+            "public.t_agence",
+            [HOP_OPERATION, "x"],
+            [{"table": "public.t_agence", "key": "age_id_agence"}],
+            [{"table": "public.t_agence", "key": "", "column": "age_code"}],
+            [{"table": "public.t_agence", "key": "k", "column": 3}],
+        ],
+        ids=["empty", "four-hops", "null", "string", "non-dict", "missing-field", "empty-field", "non-string"],
+    )
+    def test_in_via_with_a_bad_path_is_unusable(self, config, via):
+        raw = in_via_filter()
+        raw["via"] = via
+        with pytest.raises(PolicyUnavailable):
+            self.evaluate(config, raw)
+
+    def test_in_via_with_four_hops_is_unusable(self, config):
+        with pytest.raises(PolicyUnavailable):
+            self.evaluate(config, in_via_filter(via=[HOP_OPERATION, HOP_AGENCE, HOP_OPERATION, HOP_AGENCE]))
+
+    def test_via_on_other_operator_is_unusable(self, config):
+        with pytest.raises(PolicyUnavailable):
+            self.evaluate(config, in_via_filter(operator="in_"))
+
+    def test_existing_filters_unchanged(self, config):
+        decision = self.evaluate(config, in_via_filter(operator="in_", via=None))
+        assert decision.filters[0].via == ()
+
+    def test_snapshot_fallback_carries_the_path(self, config):
+        snapshot = snapshot_body(
+            resourceRules=[
+                {
+                    "kind": "sql_table",
+                    "pattern": "public.tj_operation_utilisateur",
+                    "effect": "allow",
+                    "ruleId": "r1",
+                    "filters": [{"pattern": "public.tj_operation_utilisateur", **in_via_filter()}],
+                }
+            ]
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/snapshot"):
+                return httpx.Response(200, json=snapshot)
+            raise httpx.ConnectError("PDP down")
+
+        g = guard(config, handler, policy_retries=0)
+        set_principal(USER_A)
+        decision = g.evaluate("postgres_query", [OPU])
+        assert decision.allowed
+        assert len(decision.filters[0].via) == 2
+
+    def test_snapshot_fallback_never_allows_a_malformed_row(self, config):
+        snapshot = snapshot_body(
+            resourceRules=[
+                {
+                    "kind": "sql_table",
+                    "pattern": "public.tj_operation_utilisateur",
+                    "effect": "allow",
+                    "ruleId": "r1",
+                    "filters": [{"pattern": "public.tj_operation_utilisateur", **in_via_filter(via=None)}],
+                }
+            ]
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/snapshot"):
+                return httpx.Response(200, json=snapshot)
+            raise httpx.ConnectError("PDP down")
+
+        g = guard(config, handler, policy_retries=0)
+        set_principal(USER_A)
+        with pytest.raises(PolicyUnavailable):
+            g.evaluate("postgres_query", [OPU])
+
+
+def test_scope_notice_renders_chain():
+    notice = scope_notice(
+        (
+            RowFilter(
+                resource=OPU,
+                column="opu_id_operation",
+                operator="in_via",
+                values=("775",),
+                via=(
+                    ViaHop("public.t_operation", "ope_id_operation", "ope_id_agence"),
+                    ViaHop("public.t_agence", "age_id_agence", "age_code"),
+                ),
+            ),
+        )
+    )
+    assert "tj_operation_utilisateur.opu_id_operation" in notice
+    assert "public.t_agence.age_code" in notice
+    assert "(775)" in notice

@@ -14,6 +14,7 @@ from .errors import AuthenticationRequired, PolicyDenied, PolicyUnavailable
 from .principal import Principal, current_correlation_id, current_principal, require_principal
 from .request import current_message_request, principal_from_scope
 from .snapshot import UNCONFIGURED, PolicySnapshot, SnapshotCache, raise_if_refused
+from .via import ViaHop, via_for_operator
 
 logger = structlog.get_logger()
 
@@ -84,12 +85,16 @@ def _filters_from(resource_decisions: Iterable[dict[str, Any]]) -> tuple[RowFilt
             continue
         resource = Resource(kind=str(entry["resource"]["kind"]), value=str(entry["resource"]["value"]))
         for raw in entry.get("filters", []) or []:
+            operator = str(raw["operator"])
             filters.append(
                 RowFilter(
                     resource=resource,
                     column=str(raw["column"]),
-                    operator=str(raw["operator"]),
+                    operator=operator,
                     values=tuple(str(value) for value in raw.get("values", [])),
+                    # Raises on a missing or malformed path; the caller turns that into
+                    # `PolicyUnavailable`, so an `in_via` nobody can apply is never an allow.
+                    via=via_for_operator(operator, raw),
                 )
             )
     return tuple(filters)
@@ -134,6 +139,16 @@ class RowFilter:
     column: str
     operator: str
     values: tuple[str, ...]
+    #: Join path for `in_via` (1-3 hops), empty for every other operator.
+    via: tuple[ViaHop, ...] = ()
+
+
+def _describe(f: "RowFilter") -> str:
+    if f.operator == "in_via" and f.via:
+        chain = " -> ".join(hop.table for hop in f.via)
+        last = f.via[-1]
+        return f"{f.resource.value}.{f.column} via {chain}: {last.table}.{last.column} in ({', '.join(f.values)})"
+    return f"{f.resource.value}.{f.column} {'in' if f.operator == 'in_' else f.operator} ({', '.join(f.values)})"
 
 
 def scope_notice(filters: "Iterable[RowFilter]") -> str:
@@ -150,10 +165,7 @@ def scope_notice(filters: "Iterable[RowFilter]") -> str:
     their own resolved values, which the PDP derived from their own attributes. It reveals
     nothing about other callers, other districts, or the rows withheld.
     """
-    predicates = [
-        f"{f.resource.value}.{f.column} {'in' if f.operator == 'in_' else f.operator} ({', '.join(f.values)})"
-        for f in filters
-    ]
+    predicates = [_describe(f) for f in filters]
     if not predicates:
         return ""
     return (
@@ -466,6 +478,7 @@ class Guard:
                     column=snapshot_filter.column,
                     operator=snapshot_filter.operator,
                     values=snapshot_filter.values,
+                    via=snapshot_filter.via,
                 )
                 for snapshot_filter in snapshot.filters_for(resource.kind, resource.value)
             )
