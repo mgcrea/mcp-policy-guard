@@ -664,3 +664,16 @@ def test_scope_notice_joins_group_members_with_or():
 def test_scope_notice_without_group_is_unchanged():
     notice = scope_notice((RowFilter(SALES_ORDERS, "a", "in_", ("1",)), RowFilter(SALES_ORDERS, "b", "in_", ("2",))))
     assert "limited to dbo.orders.a in (1); dbo.orders.b in (2). Rows" in notice
+
+
+def test_scope_notice_keeps_one_label_on_two_tables_apart():
+    a, b = Resource("sql_table", "public.t_a"), Resource("sql_table", "public.t_b")
+    notice = scope_notice(
+        (
+            RowFilter(resource=a, column="x", operator="in_", values=("1",), group="g"),
+            RowFilter(resource=a, column="y", operator="in_", values=("2",), group="g"),
+            RowFilter(resource=b, column="z", operator="in_", values=("3",), group="g"),
+        )
+    )
+    assert "(public.t_a.x in (1) or public.t_a.y in (2))" in notice
+    assert "or public.t_b" not in notice

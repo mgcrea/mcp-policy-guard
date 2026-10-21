@@ -169,18 +169,19 @@ def scope_notice(filters: "Iterable[RowFilter]") -> str:
     their own resolved values, which the PDP derived from their own attributes. It reveals
     nothing about other callers, other districts, or the rows withheld.
     """
-    predicates: list[str] = []
-    groups: dict[str, list[str]] = {}
+    # A label is scoped to one resource: the same label on two tables is two groups.
+    entries: list[str | tuple[Resource, str]] = []
+    groups: dict[tuple[Resource, str], list[str]] = {}
     for f in filters:
         if f.group is None:
-            predicates.append(_describe(f))
-        elif f.group in groups:
-            groups[f.group].append(_describe(f))
-        else:
-            groups[f.group] = [_describe(f)]
-            # Placeholder keeps the group where its first member appeared.
-            predicates.append(f"\0{f.group}")
-    predicates = ["(" + " or ".join(groups[p[1:]]) + ")" if p.startswith("\0") else p for p in predicates]
+            entries.append(_describe(f))
+            continue
+        key = (f.resource, f.group)
+        if key not in groups:
+            groups[key] = []
+            entries.append(key)  # keeps the group where its first member appeared
+        groups[key].append(_describe(f))
+    predicates = [e if isinstance(e, str) else "(" + " or ".join(groups[e]) + ")" for e in entries]
     if not predicates:
         return ""
     return (
