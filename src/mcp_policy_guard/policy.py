@@ -141,7 +141,7 @@ class RowFilter:
     column: str
     operator: str
     values: tuple[str, ...]
-    #: Join path for `in_via` (1-3 hops), empty for every other operator.
+    #: Join path for `in_via` (1-4 hops), empty for every other operator.
     via: tuple[ViaHop, ...] = ()
     #: Alternatives label: filters of one resource sharing a label are OR'ed, `None` = ordinary.
     group: str | None = None

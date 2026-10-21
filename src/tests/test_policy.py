@@ -467,7 +467,7 @@ class TestInVia:
         "via",
         [
             [],
-            [HOP_OPERATION, HOP_AGENCE, HOP_OPERATION, HOP_AGENCE],
+            [HOP_OPERATION, HOP_AGENCE, HOP_OPERATION, HOP_AGENCE, HOP_OPERATION],
             None,
             "public.t_agence",
             [HOP_OPERATION, "x"],
@@ -475,7 +475,7 @@ class TestInVia:
             [{"table": "public.t_agence", "key": "", "column": "age_code"}],
             [{"table": "public.t_agence", "key": "k", "column": 3}],
         ],
-        ids=["empty", "four-hops", "null", "string", "non-dict", "missing-field", "empty-field", "non-string"],
+        ids=["empty", "five-hops", "null", "string", "non-dict", "missing-field", "empty-field", "non-string"],
     )
     def test_in_via_with_a_bad_path_is_unusable(self, config, via):
         raw = in_via_filter()
@@ -483,9 +483,15 @@ class TestInVia:
         with pytest.raises(PolicyUnavailable):
             self.evaluate(config, raw)
 
-    def test_in_via_with_four_hops_is_unusable(self, config):
+    def test_in_via_with_four_hops_is_read(self, config):
+        decision = self.evaluate(config, in_via_filter(via=[HOP_OPERATION, HOP_AGENCE, HOP_OPERATION, HOP_AGENCE]))
+        assert len(decision.filters[0].via) == 4
+
+    def test_in_via_with_five_hops_is_unusable(self, config):
         with pytest.raises(PolicyUnavailable):
-            self.evaluate(config, in_via_filter(via=[HOP_OPERATION, HOP_AGENCE, HOP_OPERATION, HOP_AGENCE]))
+            self.evaluate(
+                config, in_via_filter(via=[HOP_OPERATION, HOP_AGENCE, HOP_OPERATION, HOP_AGENCE, HOP_OPERATION])
+            )
 
     def test_via_on_other_operator_is_unusable(self, config):
         with pytest.raises(PolicyUnavailable):

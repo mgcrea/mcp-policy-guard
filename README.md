@@ -561,6 +561,13 @@ The identity fields are written last and cannot be overridden by keyword argumen
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
 
+## Upgrading to 0.13.0
+
+**An `in_via` path may have 4 hops (was 3).** `MAX_VIA_HOPS` is 4. A path of 5 or more is still
+refused, as `PolicyUnavailable`. That is also what any older guard does with a 4-hop path,
+for the whole call. So a PDP must send a 4-hop path only to a guard that reports
+>= 0.13.0, and deny the table otherwise. Nothing else changed.
+
 ## Upgrading to 0.12.0
 
 **Row-filter alternatives: `RowFilter.group` and `SnapshotFilter.group`.** Filters of one rule on
@@ -581,7 +588,7 @@ would AND the members and silently narrow the result.
 ## Upgrading to 0.11.0
 
 **A new row-filter operator, `in_via`, and the join path it carries.** `RowFilter.via` (and
-`SnapshotFilter.via`) is a tuple of `ViaHop(table, key, column)`, 1 to 3 hops, empty for every
+`SnapshotFilter.via`) is a tuple of `ViaHop(table, key, column)`, 1 to 3 hops (4 since 0.13.0), empty for every
 other operator. It narrows a table by a column it does not hold: the tool follows the hops
 (`hop1.table.key` against the filtered `column`, `hop2.table.key` against `hop1.column`, and so
 on) and compares the **last** hop's `column` with `values`. Applying the path is the tool's

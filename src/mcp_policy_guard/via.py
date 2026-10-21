@@ -1,6 +1,6 @@
 """The join path carried by an `in_via` row filter.
 
-`in_via` narrows a table by a column it does not hold: the tool follows up to three hops
+`in_via` narrows a table by a column it does not hold: the tool follows up to four hops
 (`table.key` joined to the previous hop's `column`) and compares the last hop's column with
 the values. The guard only carries and validates the path; the tool applies it.
 
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-MAX_VIA_HOPS = 3
+MAX_VIA_HOPS = 4
 IN_VIA = "in_via"
 
 
@@ -26,7 +26,7 @@ class ViaHop:
 
 
 def parse_via(raw: object) -> tuple[ViaHop, ...]:
-    """A `via` list off the wire, or `ValueError` if it is anything but 1-3 well-formed hops."""
+    """A `via` list off the wire, or `ValueError` if it is anything but 1-4 well-formed hops."""
     if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_VIA_HOPS:
         raise ValueError(f"in_via path must be a list of 1-{MAX_VIA_HOPS} hops")
     hops: list[ViaHop] = []
