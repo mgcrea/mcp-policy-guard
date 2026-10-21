@@ -11,6 +11,7 @@ import structlog
 from ._version import USER_AGENT
 from .config import GuardConfig
 from .errors import AuthenticationRequired, PolicyDenied, PolicyUnavailable
+from .group import parse_group
 from .principal import Principal, current_correlation_id, current_principal, require_principal
 from .request import current_message_request, principal_from_scope
 from .snapshot import UNCONFIGURED, PolicySnapshot, SnapshotCache, raise_if_refused
@@ -95,6 +96,7 @@ def _filters_from(resource_decisions: Iterable[dict[str, Any]]) -> tuple[RowFilt
                     # Raises on a missing or malformed path; the caller turns that into
                     # `PolicyUnavailable`, so an `in_via` nobody can apply is never an allow.
                     via=via_for_operator(operator, raw),
+                    group=parse_group(raw),
                 )
             )
     return tuple(filters)
@@ -141,6 +143,8 @@ class RowFilter:
     values: tuple[str, ...]
     #: Join path for `in_via` (1-3 hops), empty for every other operator.
     via: tuple[ViaHop, ...] = ()
+    #: Alternatives label: filters of one resource sharing a label are OR'ed, `None` = ordinary.
+    group: str | None = None
 
 
 def _describe(f: "RowFilter") -> str:
@@ -165,7 +169,18 @@ def scope_notice(filters: "Iterable[RowFilter]") -> str:
     their own resolved values, which the PDP derived from their own attributes. It reveals
     nothing about other callers, other districts, or the rows withheld.
     """
-    predicates = [_describe(f) for f in filters]
+    predicates: list[str] = []
+    groups: dict[str, list[str]] = {}
+    for f in filters:
+        if f.group is None:
+            predicates.append(_describe(f))
+        elif f.group in groups:
+            groups[f.group].append(_describe(f))
+        else:
+            groups[f.group] = [_describe(f)]
+            # Placeholder keeps the group where its first member appeared.
+            predicates.append(f"\0{f.group}")
+    predicates = ["(" + " or ".join(groups[p[1:]]) + ")" if p.startswith("\0") else p for p in predicates]
     if not predicates:
         return ""
     return (
@@ -479,6 +494,7 @@ class Guard:
                     operator=snapshot_filter.operator,
                     values=snapshot_filter.values,
                     via=snapshot_filter.via,
+                    group=snapshot_filter.group,
                 )
                 for snapshot_filter in snapshot.filters_for(resource.kind, resource.value)
             )

@@ -342,3 +342,30 @@ class TestInVia:
         snapshot = PolicySnapshot.from_json(self.body(operator="in_", via=None))
         (f,) = snapshot.filters_for("sql_table", "public.tj_operation_utilisateur")
         assert f.via == ()
+
+
+class TestGroup:
+    ROW = {"kind": "sql_table", "pattern": "dbo.orders", "effect": "allow", "ruleId": "r1"}
+
+    def body(self, **filter_overrides):
+        raw = {"pattern": "dbo.orders", "column": "a", "operator": "in_", "values": ["1"], "group": "g1"}
+        raw.update(filter_overrides)
+        return snapshot_body(resourceRules=[{**self.ROW, "filters": [raw]}])
+
+    def test_snapshot_reads_group(self):
+        (f,) = PolicySnapshot.from_json(self.body()).filters_for("sql_table", "dbo.orders")
+        assert f.group == "g1"
+
+    def test_snapshot_filter_without_group_has_none(self):
+        body = self.body()
+        del body["resourceRules"][0]["filters"][0]["group"]
+        (f,) = PolicySnapshot.from_json(body).filters_for("sql_table", "dbo.orders")
+        assert f.group is None
+
+    @pytest.mark.parametrize("group", ["", "BAD", 1, None, "x" * 33])
+    def test_malformed_group_never_allows(self, config, group):
+        with pytest.raises(ValueError):
+            PolicySnapshot.from_json(self.body(group=group))
+        cached = cache(config, lambda _r: httpx.Response(200, json=self.body(group=group)))
+        with pytest.raises(PolicyUnavailable):
+            cached.get(USER_A, "postgres_query")

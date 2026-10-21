@@ -561,3 +561,106 @@ def test_scope_notice_renders_chain():
     assert "tj_operation_utilisateur.opu_id_operation" in notice
     assert "public.t_agence.age_code" in notice
     assert "(775)" in notice
+
+
+# ---------------------------------------------------------------------------
+# group (row-filter alternatives)
+# ---------------------------------------------------------------------------
+
+SALES_ORDERS = Resource("sql_table", "dbo.orders")
+
+
+def group_body(*raw_filters):
+    return evaluate_body(
+        resourceDecisions=[
+            {
+                "resource": {"kind": "sql_table", "value": "dbo.orders"},
+                "effect": "allow",
+                "matchedRuleId": "r1",
+                "filters": list(raw_filters),
+            }
+        ]
+    )
+
+
+class TestGroup:
+    def evaluate(self, config, *raw_filters):
+        g = guard(config, lambda request: httpx.Response(200, json=group_body(*raw_filters)))
+        set_principal(USER_A)
+        return g.evaluate("postgres_query", [SALES_ORDERS])
+
+    def test_group_is_parsed(self, config):
+        decision = self.evaluate(
+            config,
+            {"column": "a", "operator": "in_", "values": ["1"], "group": "host-or-mine"},
+            {"column": "b", "operator": "in_", "values": ["2"], "group": "host-or-mine"},
+        )
+        assert [f.group for f in decision.filters] == ["host-or-mine", "host-or-mine"]
+
+    def test_filter_without_group_has_none(self, config):
+        decision = self.evaluate(config, {"column": "a", "operator": "in_", "values": ["1"]})
+        assert decision.filters[0].group is None
+
+    @pytest.mark.parametrize(
+        "group",
+        ["", "UPPER", "has space", "a" * 33, 3, None, ["x"], "dot.ted"],
+        ids=["empty", "upper", "space", "too-long", "int", "null", "list", "dot"],
+    )
+    def test_malformed_group_is_unusable(self, config, group):
+        with pytest.raises(PolicyUnavailable):
+            self.evaluate(config, {"column": "a", "operator": "in_", "values": ["1"], "group": group})
+
+    def test_group_boundary_label_is_accepted(self, config):
+        decision = self.evaluate(
+            config, {"column": "a", "operator": "in_", "values": ["1"], "group": "a_-9" + "z" * 28}
+        )
+        assert len(decision.filters[0].group) == 32
+
+    def test_group_on_in_via_is_parsed(self, config):
+        raw = {"column": "c", "operator": "in_via", "values": ["1"], "via": [HOP_OPERATION], "group": "g1"}
+        decision = self.evaluate(config, raw)
+        assert decision.filters[0].group == "g1"
+        assert len(decision.filters[0].via) == 1
+
+    def test_snapshot_fallback_carries_group(self, config):
+        snapshot = snapshot_body(
+            resourceRules=[
+                {
+                    "kind": "sql_table",
+                    "pattern": "dbo.orders",
+                    "effect": "allow",
+                    "ruleId": "r1",
+                    "filters": [
+                        {"pattern": "dbo.orders", "column": "a", "operator": "in_", "values": ["1"], "group": "g1"},
+                        {"pattern": "dbo.orders", "column": "b", "operator": "in_", "values": ["2"], "group": "g1"},
+                        {"pattern": "dbo.orders", "column": "c", "operator": "in_", "values": ["3"]},
+                    ],
+                }
+            ]
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/snapshot"):
+                return httpx.Response(200, json=snapshot)
+            raise httpx.ConnectError("PDP down")
+
+        g = guard(config, handler, policy_retries=0)
+        set_principal(USER_A)
+        decision = g.evaluate("postgres_query", [SALES_ORDERS])
+        assert [f.group for f in decision.filters] == ["g1", "g1", None]
+
+
+def test_scope_notice_joins_group_members_with_or():
+    notice = scope_notice(
+        (
+            RowFilter(SALES_ORDERS, "country", "in_", ("1",)),
+            RowFilter(SALES_ORDERS, "host", "in_", ("775",), group="g1"),
+            RowFilter(SALES_ORDERS, "auditor", "in_", ("42",), group="g1"),
+        )
+    )
+    assert "dbo.orders.country in (1); (dbo.orders.host in (775) or dbo.orders.auditor in (42))" in notice
+
+
+def test_scope_notice_without_group_is_unchanged():
+    notice = scope_notice((RowFilter(SALES_ORDERS, "a", "in_", ("1",)), RowFilter(SALES_ORDERS, "b", "in_", ("2",))))
+    assert "limited to dbo.orders.a in (1); dbo.orders.b in (2). Rows" in notice

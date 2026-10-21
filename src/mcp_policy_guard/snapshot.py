@@ -21,6 +21,7 @@ import structlog
 from ._version import USER_AGENT
 from .config import GuardConfig
 from .errors import PolicyUnavailable
+from .group import parse_group
 from .matching import glob_matches
 from .principal import Principal
 from .via import ViaHop, via_for_operator
@@ -63,6 +64,8 @@ class SnapshotFilter:
     values: tuple[str, ...]
     #: Join path for `in_via`, empty for every other operator.
     via: tuple[ViaHop, ...] = ()
+    #: Alternatives label, `None` for an ordinary filter. Carried only; the tool applies it.
+    group: str | None = None
 
     def covers(self, kind: str, value: str) -> bool:
         return self.kind == kind and glob_matches(self.pattern, value)
@@ -104,6 +107,7 @@ class PolicySnapshot:
                         operator=str(raw["operator"]),
                         values=tuple(str(value) for value in raw.get("values", [])),
                         via=via_for_operator(str(raw["operator"]), raw),
+                        group=parse_group(raw),
                     )
                     for raw in entry.get("filters", []) or []
                 ),

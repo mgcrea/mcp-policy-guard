@@ -561,6 +561,23 @@ The identity fields are written last and cannot be overridden by keyword argumen
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
 
+## Upgrading to 0.12.0
+
+**Row-filter alternatives: `RowFilter.group` and `SnapshotFilter.group`.** Filters of one rule on
+the same resource that share a `group` label are alternatives: the tool must OR them, while
+groups and ungrouped filters still AND (`A AND (B OR C)`). The wire field `group` is a label
+matching `^[a-z0-9_-]{1,32}$`, **omitted (never null) when a filter has no group**, so a decision
+or snapshot without alternatives parses exactly as before and `group` is `None`. This package
+only carries and validates the label (`parse_group` is exported); it does not evaluate filters,
+on the snapshot fallback path included. Applying the OR is the tool's job.
+
+Validation fails closed, on both the evaluate and the snapshot path: a `group` that is not a
+string of that shape (empty, upper case, longer than 32, null, a number) raises
+`PolicyUnavailable` rather than becoming an allow. `scope_notice` joins the members of a group
+with " or ", in parentheses; other filters keep their wording. A tool that cannot apply
+alternatives must refuse a call whose `decision.filters` carry a `group`: ignoring the field
+would AND the members and silently narrow the result.
+
 ## Upgrading to 0.11.0
 
 **A new row-filter operator, `in_via`, and the join path it carries.** `RowFilter.via` (and

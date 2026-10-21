@@ -38,6 +38,7 @@ from .errors import (
     PolicyNotEvaluated,
     PolicyUnavailable,
 )
+from .group import parse_group
 from .middleware import GuardMiddleware
 from .policy import UNDETERMINED, Decision, Guard, Resource, RowFilter, scope_notice
 from .principal import (
@@ -93,6 +94,7 @@ __all__ = [
     "emit",
     "guarded",
     "is_guarded",
+    "parse_group",
     "parse_via",
     "redact",
     "scope_notice",
