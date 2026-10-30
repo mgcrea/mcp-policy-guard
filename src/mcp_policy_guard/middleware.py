@@ -194,12 +194,10 @@ class GuardMiddleware:
             # other request on this worker for the duration of a cold start.
             principal = await anyio.to_thread.run_sync(verify_token, token, self.config)
         except AuthenticationRequired as exc:
-            if self.config.require_auth:
-                await _unauthorized(send, exc.reason)
-                return
-            # A *present but invalid* token is never accepted as anonymous, even when not
-            # enforcing: it means the caller believes it is authenticated, and letting the
-            # call through unattributed would file its actions under nobody.
+            # Refused whether or not `require_auth` is on. A *present but invalid* token is
+            # never accepted as anonymous, even when not enforcing: it means the caller
+            # believes it is authenticated, and letting the call through unattributed would
+            # file its actions under nobody.
             await _unauthorized(send, exc.reason)
             return
 
