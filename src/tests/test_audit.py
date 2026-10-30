@@ -105,6 +105,25 @@ class TestDecisionRecording:
         assert captured[0]["resources"] == ["dbo.payroll"]
         assert captured[0]["error_type"] == "PolicyDenied"
 
+    def test_a_cancelled_call_is_still_recorded(self, captured):
+        # `CancelledError` is a `BaseException`, so a handler cancelled mid-call (client
+        # disconnect, `notifications/cancelled`) must not slip past the record the way it
+        # slips past `except Exception`. It may already have read the data it was after.
+        import asyncio
+
+        set_principal(USER_A)
+        with pytest.raises(asyncio.CancelledError):
+            with audit_call("mssql_query", {"query": "SELECT * FROM dbo.orders"}) as record:
+                record["resources"] = ["dbo.orders"]
+                record["decision"] = "allow"
+                raise asyncio.CancelledError()
+
+        assert len(captured) == 1
+        assert captured[0]["success"] is False
+        assert captured[0]["decision"] == "allow"
+        assert captured[0]["resources"] == ["dbo.orders"]
+        assert captured[0]["error_type"] == "CancelledError"
+
     def test_records_duration(self, captured):
         with audit_call("mssql_query", {"query": "SELECT 1"}):
             pass

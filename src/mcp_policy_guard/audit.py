@@ -163,7 +163,9 @@ def audit_call(tool: str, params: dict[str, Any]) -> Iterator[dict[str, Any]]:
     context: dict[str, Any] = {"decision": None, "reason": None, "resources": []}
     try:
         yield context
-    except Exception as exc:
+    # `BaseException`, because "however it ends" includes cancellation: `CancelledError`
+    # is not an `Exception`, and a cancelled call may already have read what it asked for.
+    except BaseException as exc:
         emit(
             "tool_call_failed",
             tool=tool,
