@@ -5,19 +5,22 @@ license = "MIT"
 description = "Per-caller authentication and authorization for MCP servers"
 requires-python = ">=3.12"
 dependencies = [
-    "anyio>=4.0.0",
-    "httpx>=0.28.0",
-    "pyjwt[crypto]>=2.13.0",
-    "structlog>=24.0.0",
+    "anyio>=4.15.1",
+    "httpx>=0.28.1",
+    "pyjwt[crypto]>=2.15.1",
+    "structlog>=26.1.0",
 ]
 
 [dependency-groups]
 dev = [
-    "ruff>=0.9.0",
-    "pytest>=8.0.0",
-    "pytest-asyncio>=0.24.0",
-    "cryptography>=44.0.0",
-    "mcp==1.26.0",
+    "ruff>=0.17.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "cryptography>=50.0.2",
+    # Not a runtime dependency (see request.py): the SDK generation the tests run against.
+    # Pinned to what the consuming servers run in production. CI's test matrix overrides it
+    # with `uv run --with mcp==<version>` to keep the 1.x path covered as well.
+    "mcp==2.3.0",
 ]
 
 [build-system]
