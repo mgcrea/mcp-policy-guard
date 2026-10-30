@@ -1,14 +1,14 @@
 [project]
 name = "mcp-policy-guard"
-version = "0.13.0"
+version = "0.13.1"
 license = "MIT"
 description = "Per-caller authentication and authorization for MCP servers"
 requires-python = ">=3.12"
 dependencies = [
-    "anyio>=4.15.1",
-    "httpx>=0.28.1",
-    "pyjwt[crypto]>=2.15.1",
-    "structlog>=26.1.0",
+    "anyio>=4.0.0",
+    "httpx>=0.28.0",
+    "pyjwt[crypto]>=2.13.0",
+    "structlog>=24.0.0",
 ]
 
 [dependency-groups]

@@ -561,6 +561,13 @@ The identity fields are written last and cannot be overridden by keyword argumen
 decision**: nothing verifies it, so a policy reading it would be taking the word of the party
 it is meant to constrain.
 
+## Upgrading to 0.13.1
+
+**Two fixes, no API change.** A PDP snapshot with a missing field or the wrong shape is now
+refused as `PolicyUnavailable`, like an unreachable PDP, instead of escaping as a raw
+`KeyError`/`TypeError` past `except PolicyDenied`. A tool call cancelled mid-flight is now
+audited instead of leaving no record. Nothing else changed.
+
 ## Upgrading to 0.13.0
 
 **An `in_via` path may have 4 hops (was 3).** `MAX_VIA_HOPS` is 4. A path of 5 or more is still
