@@ -150,7 +150,7 @@ def _assert_bearer_token(claims: dict[str, Any]) -> None:
     typ = claims.get("typ")
     if isinstance(typ, str) and typ.lower() != "bearer":
         logger.warning("rejected_non_access_token", typ=typ)
-        raise AuthenticationRequired("Invalid or expired token")
+        raise AuthenticationRequired(_REFUSED)
 
 
 class _ReplayCache:
@@ -329,7 +329,7 @@ def verify_token(token: str, config: GuardConfig) -> Principal:
         )
     except jwt.exceptions.PyJWTError as exc:
         logger.warning("token_verification_failed", error=str(exc))
-        raise AuthenticationRequired("Invalid or expired token") from exc
+        raise AuthenticationRequired(_REFUSED) from exc
 
     _assert_bearer_token(claims)
 
@@ -337,4 +337,4 @@ def verify_token(token: str, config: GuardConfig) -> Principal:
         return Principal.from_claims(claims, token)
     except ValueError as exc:
         logger.warning("token_missing_subject")
-        raise AuthenticationRequired("Invalid or expired token") from exc
+        raise AuthenticationRequired(_REFUSED) from exc
