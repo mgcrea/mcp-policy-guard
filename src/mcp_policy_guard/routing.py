@@ -77,7 +77,7 @@ def routes(
     config: GuardConfig,
     *,
     extra_routes: Sequence[Any] = (),
-    sse_path: str = "/sse",
+    sse_path: str = DEFAULT_SSE_PATH,
     app_kwargs: Mapping[str, Any] | None = None,
     sse_app_kwargs: Mapping[str, Any] | None = None,
 ) -> list[Any]:
