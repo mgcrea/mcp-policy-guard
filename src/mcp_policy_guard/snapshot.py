@@ -13,7 +13,7 @@ import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
 import httpx
 import structlog
@@ -45,6 +45,37 @@ def raise_if_refused(status_code: int, what: str) -> None:
     """
     if status_code in REFUSAL_STATUSES:
         raise PolicyUnavailable(f"{what}: decision point refused the request (HTTP {status_code})")
+
+
+class FilterFields(TypedDict):
+    """The predicate half of a wire filter, common to `RowFilter` and `SnapshotFilter`."""
+
+    column: str
+    operator: str
+    values: tuple[str, ...]
+    via: tuple[ViaHop, ...]
+    group: str | None
+
+
+def parse_filter_fields(raw: dict[str, Any]) -> FilterFields:
+    """Read and validate one wire filter's predicate fields.
+
+    The one parser for both the `/evaluate` body and the `/snapshot` body, which carry the
+    same filter object. Each new field (`via`, then `group`) used to be added to both parsers
+    by hand; a field read on one path and forgotten on the other would be a predicate the
+    outage fallback silently drops.
+
+    Raises `KeyError` on a missing field and `ValueError` on a malformed `via` or `group`;
+    both callers turn either into `PolicyUnavailable`.
+    """
+    operator = str(raw["operator"])
+    return FilterFields(
+        column=str(raw["column"]),
+        operator=operator,
+        values=tuple(str(value) for value in raw.get("values", [])),
+        via=via_for_operator(operator, raw),
+        group=parse_group(raw),
+    )
 
 
 @dataclass(frozen=True)
@@ -103,11 +134,7 @@ class PolicySnapshot:
                     SnapshotFilter(
                         kind=str(entry["kind"]),
                         pattern=str(raw.get("pattern", entry["pattern"])),
-                        column=str(raw["column"]),
-                        operator=str(raw["operator"]),
-                        values=tuple(str(value) for value in raw.get("values", [])),
-                        via=via_for_operator(str(raw["operator"]), raw),
-                        group=parse_group(raw),
+                        **parse_filter_fields(raw),
                     )
                     for raw in entry.get("filters", []) or []
                 ),

@@ -11,11 +11,10 @@ import structlog
 from ._version import USER_AGENT
 from .config import GuardConfig
 from .errors import AuthenticationRequired, PolicyDenied, PolicyUnavailable
-from .group import parse_group
 from .principal import Principal, current_correlation_id, current_principal, require_principal
 from .request import current_message_request, principal_from_scope
-from .snapshot import UNCONFIGURED, PolicySnapshot, SnapshotCache, raise_if_refused
-from .via import ViaHop, via_for_operator
+from .snapshot import UNCONFIGURED, PolicySnapshot, SnapshotCache, parse_filter_fields, raise_if_refused
+from .via import ViaHop
 
 logger = structlog.get_logger()
 
@@ -86,19 +85,9 @@ def _filters_from(resource_decisions: Iterable[dict[str, Any]]) -> tuple[RowFilt
             continue
         resource = Resource(kind=str(entry["resource"]["kind"]), value=str(entry["resource"]["value"]))
         for raw in entry.get("filters", []) or []:
-            operator = str(raw["operator"])
-            filters.append(
-                RowFilter(
-                    resource=resource,
-                    column=str(raw["column"]),
-                    operator=operator,
-                    values=tuple(str(value) for value in raw.get("values", [])),
-                    # Raises on a missing or malformed path; the caller turns that into
-                    # `PolicyUnavailable`, so an `in_via` nobody can apply is never an allow.
-                    via=via_for_operator(operator, raw),
-                    group=parse_group(raw),
-                )
-            )
+            # Raises on a missing field or a malformed path or group; the caller turns that
+            # into `PolicyUnavailable`, so an `in_via` nobody can apply is never an allow.
+            filters.append(RowFilter(resource=resource, **parse_filter_fields(raw)))
     return tuple(filters)
 
 
