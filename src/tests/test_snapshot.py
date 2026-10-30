@@ -195,6 +195,35 @@ class TestFailureModes:
         with pytest.raises(PolicyUnavailable):
             cached.get(USER_A, "mssql_query")
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # A row missing a required field: KeyError out of `from_json`.
+            snapshot_body(resourceRules=[{"kind": "sql_table", "pattern": "dbo.*", "effect": "allow"}]),
+            # A filter missing its column.
+            snapshot_body(
+                resourceRules=[
+                    {
+                        "kind": "sql_table",
+                        "pattern": "dbo.*",
+                        "effect": "allow",
+                        "ruleId": "r1",
+                        "filters": [{"operator": "in_", "values": ["1"]}],
+                    }
+                ]
+            ),
+            # Not an object at all: AttributeError on `.get`.
+            [snapshot_body()],
+            # A null version: TypeError out of `int(None)`.
+            snapshot_body(version=None),
+        ],
+    )
+    def test_an_unparseable_body_fails_closed(self, config, body):
+        # Same contract as the evaluate path: a malformed body is neither an HTTP error nor
+        # a denial, so anything but `PolicyUnavailable` escapes every `except PolicyDenied`.
+        with pytest.raises(PolicyUnavailable):
+            cache(config, lambda _r: httpx.Response(200, json=body)).get(USER_A, "mssql_query")
+
     def test_fail_open_requires_an_explicit_opt_in(self, config):
         def handler(_request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("backend down")

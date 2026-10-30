@@ -249,9 +249,11 @@ class SnapshotCache:
 
         try:
             snapshot = PolicySnapshot.from_json(response.json())
-        except ValueError as exc:
-            # An `in_via` filter nobody can apply. A snapshot is served to every later call,
-            # so a bad row must refuse here rather than be cached as an allow.
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            # An `in_via` filter nobody can apply, a row missing a field, a body that is not
+            # an object. A snapshot is served to every later call, so a bad row must refuse
+            # here rather than be cached as an allow — and as `PolicyUnavailable`, the same as
+            # the evaluate path, because a raw `KeyError` escapes every `except PolicyDenied`.
             logger.error("policy_snapshot_malformed", error=str(exc))
             raise PolicyUnavailable(f"Policy snapshot is unusable: {exc}") from exc
 
