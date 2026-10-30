@@ -388,21 +388,30 @@ class Guard:
             "reason": reason[:500],
             "resources": [{"kind": r.kind, "value": r.value} for r in resources],
         }
-        correlation_id = current_correlation_id()
-        if correlation_id:
-            payload["correlationId"] = correlation_id
 
         try:
-            response = self._client.post(
-                f"{self.config.policy_url}/report",
-                json=payload,
-                headers={"Authorization": f"Bearer {caller.token}", "User-Agent": USER_AGENT},
-                timeout=self.config.timeout_seconds,
-            )
+            response = self._post("/report", caller, payload)
             if response.status_code >= 400:
                 logger.warning("policy_report_rejected", status=response.status_code)
         except Exception as exc:  # noqa: BLE001 - see the docstring; this must never raise
             logger.warning("policy_report_failed", error=str(exc))
+
+    def _post(self, path: str, caller: Principal, payload: dict[str, Any]) -> httpx.Response:
+        """POST `payload` to the PDP as `caller`, with the correlation id when there is one.
+
+        Shared by `/evaluate` and `/report` so the two cannot drift on what identifies a
+        call: the caller's own bearer, the guard's `User-Agent` (see `report_not_evaluated`
+        for why that one matters) and the turn's correlation id.
+        """
+        correlation_id = current_correlation_id()
+        if correlation_id:
+            payload["correlationId"] = correlation_id
+        return self._client.post(
+            f"{self.config.policy_url}{path}",
+            json=payload,
+            headers={"Authorization": f"Bearer {caller.token}", "User-Agent": USER_AGENT},
+            timeout=self.config.timeout_seconds,
+        )
 
     def _evaluate_remote(self, caller: Principal, function_name: str | None, resources: Sequence[Resource]) -> Decision:
         payload: dict[str, Any] = {
@@ -410,16 +419,7 @@ class Guard:
             "function": function_name,
             "resources": [{"kind": r.kind, "value": r.value} for r in resources],
         }
-        correlation_id = current_correlation_id()
-        if correlation_id:
-            payload["correlationId"] = correlation_id
-
-        response = self._client.post(
-            f"{self.config.policy_url}/evaluate",
-            json=payload,
-            headers={"Authorization": f"Bearer {caller.token}", "User-Agent": USER_AGENT},
-            timeout=self.config.timeout_seconds,
-        )
+        response = self._post("/evaluate", caller, payload)
 
         # Shared with the snapshot path so the two cannot disagree about what counts as a
         # refusal rather than an outage.
